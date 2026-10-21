@@ -1,0 +1,65 @@
+{
+  "name": "bili-relation-manager",
+  "version": "2.1.4",
+  "description": "B站多账号关注管理台 · 自动取关单向关注 / 自动回粉互粉",
+  "main": "main.js",
+  "author": "local",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "build": "electron-builder --win --x64",
+    "test": "node test/smoke.js && node test/engine.js && node test/ui.js"
+  },
+  "devDependencies": {
+    "electron": "44.9.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.local.bili.relation.manager",
+    "productName": "B站关注管理台",
+    "copyright": "Copyright © 2026",
+    "directories": {
+      "output": "dist",
+      "buildResources": "resources"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "src/**/*",
+      "renderer/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "B站关注管理台-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "B站关注管理台",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "B站关注管理台-${version}-便携版.${ext}"
+    },
+    "compression": "maximum",
+    "asar": true
+  }
+}

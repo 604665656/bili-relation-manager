@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' file: https: data:;">
+  <title>B站关注管理台</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">bilibili</span>
+      <span class="title">关注管理台</span>
+      <span class="ver" id="ver">v?</span>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="btn-add">+ 扫码登录账号</button>
+      <button class="btn" id="btn-import">手动导入 Cookie</button>
+      <button class="btn" id="btn-start-all">▶ 全部开始</button>
+      <button class="btn danger" id="btn-stop-all">■ 全部停止</button>
+      <button class="btn ghost" id="btn-refresh-stats">刷新统计</button>
+      <button class="btn ghost" id="btn-export">导出 CSV</button>
+      <button class="btn ghost" id="btn-datadir">数据目录</button>
+      <button class="btn ghost" id="btn-support">联系合作 / 打赏</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左：账号列表 -->
+    <section class="panel accounts">
+      <div class="panel-head">
+        <span>账号</span>
+        <span class="muted" id="acc-count">0</span>
+      </div>
+      <div class="acc-list" id="acc-list"></div>
+      <div class="empty" id="acc-empty">
+        <p>还没有账号</p>
+        <p class="muted">点击右上角「扫码登录账号」<br>可重复登录多个，全部并行执行</p>
+      </div>
+    </section>
+
+    <!-- 中：选中账号配置 -->
+    <section class="panel config" id="cfg-panel" hidden>
+      <div class="panel-head"><span>任务配置</span><span class="muted" id="cfg-uname"></span></div>
+      <div class="cfg-body">
+        <div class="row col">
+          <label class="lbl">任务类型（可多选，勾几个就跑几个）</label>
+          <div class="checks">
+            <label class="cb strong"><input type="checkbox" id="task-unfollow"> 清理单向关注
+              <span class="hint">取关「我关注了TA、TA一直没回关我」的人</span></label>
+            <label class="cb strong"><input type="checkbox" id="task-follow"> 自动关注目标（陌生人）
+              <span class="hint">从下方来源自动找人关注，不用手动填 UID；已自动排除你自己的粉丝（回粉请单独勾选「我的粉丝列表」）</span></label>
+          </div>
+        </div>
+
+        <div class="row col" id="row-sources">
+          <label class="lbl">目标来源（可多选）</label>
+          <div class="checks">
+            <label class="cb"><input type="checkbox" id="src-fans"> 我的粉丝列表
+              <span class="hint">回粉专用：在粉丝里找还没互粉的人回关</span></label>
+            <label class="cb"><input type="checkbox" id="src-search"> 关键词搜索
+              <span class="hint">按关键词搜陌生人关注（已排除你的粉丝）</span></label>
+            <label class="cb"><input type="checkbox" id="src-ups"> 指定 UP 的粉丝
+              <span class="hint">关注 TA 的粉丝里还不是你粉丝的人（已排除你的粉丝）</span></label>
+          </div>
+        </div>
+
+        <div class="row col" id="row-keywords">
+          <label class="lbl">搜索关键词（空格 / 逗号分隔，每个词独立统计回关率）</label>
+          <input type="text" id="cfg-keywords" placeholder="例如：手绘 板绘 原画">
+        </div>
+
+        <div class="row" id="row-kwopts">
+          <label class="lbl">每个词翻</label>
+          <input type="number" id="cfg-searchpages" min="1" max="20"> 页
+          <label class="lbl">粉丝数不超过</label>
+          <input type="number" id="cfg-maxfans" min="0">
+          <label class="lbl">最低等级 Lv</label>
+          <input type="number" id="cfg-minlevel" min="0" max="6">
+          <span class="hint">粉丝数填 0 = 不限；中小号回关率更高</span>
+        </div>
+
+        <div class="row" id="row-target">
+          <label class="lbl">目标 UP 的 UID</label>
+          <input type="text" id="cfg-targets" placeholder="多个用空格/逗号分隔，如 123 456">
+          <span class="hint">他人粉丝列表接口仅开放前 1000 条</span>
+        </div>
+
+        <div class="row">
+          <label class="lbl">操作间隔</label>
+          <input type="number" id="cfg-min" min="1000" step="500"> ms ~
+          <input type="number" id="cfg-max" min="1000" step="500"> ms
+        </div>
+
+        <div class="row">
+          <label class="lbl">每种模式上限</label>
+          <input type="number" id="cfg-limit" min="1" max="500">
+          <label class="cb"><input type="checkbox" id="cfg-official"> 跳过认证账号</label>
+          <label class="cb"><input type="checkbox" id="cfg-special"> 跳过特别关注</label>
+        </div>
+
+        <div class="row">
+          <label class="cb strong"><input type="checkbox" id="cfg-dry"> 演练模式（先跑一遍看看名单，不真正执行）</label>
+        </div>
+
+        <div class="sep"></div>
+
+        <div class="row">
+          <label class="cb"><input type="checkbox" id="cfg-days"> 仅处理「关注满</label>
+          <input type="number" id="cfg-days-n" min="1" max="365"> 天仍未回关」的账号
+          <span class="hint">依据接口返回的关注时间 mtime，缺失则跳过</span>
+        </div>
+
+        <div class="sep"></div>
+
+        <div class="row">
+          <label class="cb"><input type="checkbox" id="cfg-loop"> 自动循环</label>
+          <label class="lbl">每轮间隔</label>
+          <input type="number" id="cfg-loop-min" min="1" max="1440"> 分钟
+          <label class="lbl">每日上限</label>
+          <input type="number" id="cfg-daily" min="0" max="2000">
+          <span class="hint">0 = 不限</span>
+        </div>
+
+        <div class="row">
+          <label class="lbl">异常后自动重启</label>
+          <input type="number" id="cfg-errretry" min="0" max="1440"> 分钟
+          <span class="hint">0 = 异常即停止；设 &gt;0 则等待该时长后自动重启（连续异常达 6 次上限后停止，防死循环）</span>
+        </div>
+
+        <div class="row">
+          <label class="lbl">看门狗停滞阈值</label>
+          <input type="number" id="cfg-watchdog" min="0" max="240"> 分钟
+          <span class="hint">单轮内连续无「扫描/操作」进展超过该时长，判定卡死并强制重启恢复；0 = 关闭看门狗（默认 15 分钟）</span>
+        </div>
+
+        <div class="row btns">
+          <button class="btn primary" id="btn-start-one">▶ 启动此账号</button>
+          <button class="btn danger" id="btn-stop-one">■ 停止</button>
+          <button class="btn ghost" id="btn-refresh-one">刷新资料</button>
+          <button class="btn ghost" id="btn-reset-one">重置统计</button>
+          <button class="btn ghost" id="btn-del-one">删除账号</button>
+        </div>
+
+        <div class="stats" id="cfg-stats"></div>
+      </div>
+
+      <div class="panel-head sub"><span>全局设置</span></div>
+      <div class="cfg-body">
+        <div class="row">
+          <label class="cb strong"><input type="checkbox" id="g-autostart"> 启动时自动恢复任务
+            <span class="hint">开启后，软件每次启动会自动接回「有任务且未禁用」的账号，第二天 / 崩溃重启后无需手动点「开始」</span></label>
+        </div>
+        <div class="row">
+          <label class="lbl">翻页间隔</label>
+          <input type="number" id="g-pagegap" min="300" max="60000" step="100"> ms
+        </div>
+        <div class="row">
+          <label class="lbl">回关率下限</label>
+          <input type="number" id="g-threshold" min="0" max="100" step="1"> %
+          <label class="lbl">最小样本</label>
+          <input type="number" id="g-sample" min="5" max="500">
+        </div>
+        <div class="row">
+          <label class="lbl">关注后</label>
+          <input type="number" id="g-gap" min="1" max="168"> 小时才核验回关
+          <label class="lbl">统计刷新</label>
+          <input type="number" id="g-statint" min="1" max="60"> 分钟
+        </div>
+        <div class="row col">
+          <label class="lbl">全局白名单 UID（逗号/空格/换行分隔，对所有账号生效）</label>
+          <textarea id="g-white" rows="2" placeholder="例如：123456 889900"></textarea>
+        </div>
+        <div class="row col">
+          <label class="lbl">不再关注名单（取关成功后自动写入；这里可手动增删）<span class="muted" id="never-count"></span></label>
+          <textarea id="g-never" rows="2" placeholder="每行/逗号分隔一个 UID"></textarea>
+        </div>
+        <div class="row">
+          <button class="btn small" id="btn-save-global">保存全局设置</button>
+          <button class="btn small danger" id="btn-never-clear">清空不再关注名单</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右：日志 / 明细 / 统计 -->
+    <section class="panel logs">
+      <div class="panel-head">
+        <span>运行结果</span>
+        <div class="tabs">
+          <button class="tab active" data-tab="log">日志</button>
+          <button class="tab" data-tab="record">操作明细</button>
+          <button class="tab" data-tab="stat">统计</button>
+        </div>
+      </div>
+      <div class="tabpane" id="pane-log"><div class="logbox" id="logbox"></div></div>
+      <div class="tabpane" id="pane-record" hidden><div class="recbox" id="recbox"></div></div>
+      <div class="tabpane" id="pane-stat" hidden><div class="recbox" id="statbox"></div></div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span id="status">就绪</span>
+    <span class="grow"></span>
+    <span class="warn-tip">单次 ≤ 50 · 间隔 ≥ 3 秒 · 触发 -509 / -352 请立即停止</span>
+  </footer>
+
+  <!-- 扫码登录进行中提示条 -->
+  <div class="loginbar" id="login-bar" hidden>
+    <span class="dot"></span>
+    <span>已打开登录窗口，请用手机 B 站 App 扫码，并在手机上点「确认登录」</span>
+    <span class="grow"></span>
+    <button class="btn small" id="btn-login-refresh">刷新登录页</button>
+    <button class="btn small" id="btn-login-cancel">取消登录</button>
+    <button class="btn small ghost" id="btn-login-manual">改用手动导入</button>
+  </div>
+
+  <!-- 手动导入 Cookie -->
+  <div class="modal" id="modal-import" hidden>
+    <div class="modal-box">
+      <div class="modal-h">手动导入 Cookie（扫码不通时的兜底方案）</div>
+      <div class="modal-b">
+        <p class="muted">① 用浏览器打开 <b>bilibili.com</b> 并登录　② F12 → Application（应用）→ Cookies → https://www.bilibili.com
+          　③ 找到 <b>SESSDATA</b>、<b>bili_jct</b>、<b>DedeUserID</b> 三项，按下面任意一种格式粘贴：</p>
+        <textarea id="import-cookie" rows="6" placeholder="格式一（推荐）：SESSDATA=xxx; bili_jct=yyy; DedeUserID=123456&#10;格式二（每行一项）：SESSDATA xxx&#10;bili_jct yyy&#10;DedeUserID 123456"></textarea>
+        <p class="warnline">Cookie 等同于登录凭证，只会保存在你本机，不会上传。</p>
+      </div>
+      <div class="modal-f">
+        <button class="btn primary" id="btn-import-ok">导入并校验</button>
+        <button class="btn" id="btn-import-cancel">取消</button>
+        <span class="grow"></span>
+        <span class="muted" id="import-msg"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 联系合作 / 随缘打赏支持 -->
+  <div class="modal" id="modal-support" hidden>
+    <div class="modal-box support-box">
+      <div class="modal-h">联系合作 · 随缘打赏支持</div>
+      <div class="modal-b">
+        <p class="muted">本工具完全免费，所有数据只保存在你本机、不上传服务器。如果它帮你省了事，欢迎「随缘」打赏支持，或来找我聊合作。</p>
+
+        <div class="support-section">
+          <div class="support-title">联系合作</div>
+          <div class="qr-grid">
+            <figure class="qr-item">
+              <img src="assets/douyin.jpg" alt="抖音">
+              <figcaption>抖音：许许许许许、若辰<br>抖音号 / 合作：A604665656</figcaption>
+            </figure>
+            <figure class="qr-item">
+              <img src="assets/bilibili.jpg" alt="B站">
+              <figcaption>B站：许许许许许、若辰<br>UID：298813</figcaption>
+            </figure>
+          </div>
+        </div>
+
+        <div class="support-section">
+          <div class="support-title">随缘打赏支持</div>
+          <div class="qr-grid">
+            <figure class="qr-item">
+              <img src="assets/wechat-pay.jpg" alt="微信支付">
+              <figcaption>微信支付</figcaption>
+            </figure>
+            <figure class="qr-item">
+              <img src="assets/alipay.jpg" alt="支付宝">
+              <figcaption>支付宝</figcaption>
+            </figure>
+            <figure class="qr-item">
+              <img src="assets/alipay-hongbao.png" alt="支付宝扫码领红包">
+              <figcaption>支付宝扫码领红包</figcaption>
+            </figure>
+          </div>
+        </div>
+      </div>
+      <div class="modal-f">
+        <button class="btn primary" id="btn-support-close">关闭</button>
+        <span class="grow"></span>
+        <span class="muted">感谢支持</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
