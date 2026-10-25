@@ -10,7 +10,7 @@ const { Engine, sourceLabel, accountsToAutoStart } = require('./src/task');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-25 10:45 中文应用菜单';
+const BUILD_TAG = '2026-10-25 11:00 关注上限保护';
 let store, engine, mainWindow = null, loginWindow = null;
 
 app.disableHardwareAcceleration();

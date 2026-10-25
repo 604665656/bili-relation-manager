@@ -323,11 +323,29 @@ class Engine extends EventEmitter {
     if (T.unfollow) await this._phaseUnfollow(acc, run, client);
 
     if (T.follow && !run.cancel) {
-      if (S.fans) await this._phaseFollowBack(acc, run, client);
-      if (S.search && !run.cancel) await this._phaseSearch(acc, run, client);
-      if (S.ups && !run.cancel) await this._phaseFansOf(acc, run, client);
-      if (!S.fans && !S.search && !S.ups) {
-        this._log(id, 'warn', '已勾选「自动关注目标」但未选任何来源，跳过关注阶段');
+      // ── 关注上限保护 ──
+      // B站普通账号关注上限 5000，满了之后任何关注请求都会被拒（22016）。
+      // 这里先取关（上面已跑）再复核当前关注数：达到上限就跳过关注阶段，
+      // 既避免硬闯触发致命错误，也提示用户先「清理单向关注」腾名额。
+      const cap = Number((this.store.get().global || {}).followCap) || 0;
+      let followBlocked = false;
+      if (cap > 0) {
+        const s = await client.stat(client.mid);
+        const cur = (s && s.code === 0) ? s.following : null;
+        if (cur != null && cur >= cap) {
+          followBlocked = true;
+          this._log(id, 'warn', `关注数已达上限 ${cur}（≥ ${cap}），本轮跳过「自动关注」以免被 B 站拒绝；请先「清理单向关注」释放名额`);
+        } else if (cur != null && cur >= cap - 100) {
+          this._log(id, 'warn', `关注数 ${cur} 已接近上限 ${cap}，建议优先「清理单向关注」腾出名额`);
+        }
+      }
+      if (!followBlocked) {
+        if (S.fans) await this._phaseFollowBack(acc, run, client);
+        if (S.search && !run.cancel) await this._phaseSearch(acc, run, client);
+        if (S.ups && !run.cancel) await this._phaseFansOf(acc, run, client);
+        if (!S.fans && !S.search && !S.ups) {
+          this._log(id, 'warn', '已勾选「自动关注目标」但未选任何来源，跳过关注阶段');
+        }
       }
     }
 

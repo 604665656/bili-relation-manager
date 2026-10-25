@@ -676,6 +676,44 @@ async function t(name, fn) {
     });
   }
 
+  /* ══════ [18] 关注上限保护 ══════ */
+  console.log('\n[18] 关注上限保护');
+  actions = [];
+  const s18 = mkStore({ followCap: 10 });
+  FIX.stat = { following: 5000, follower: 100 };   // 模拟关注数已满
+  FIX.followings['1800'] = [item(19001, 2)];       // 单向关注 → 应取关（腾名额）
+  FIX.followers['1800'] = [item(19002, 0)];        // 回粉目标 → 应被跳过（已达上限）
+  const a18 = mkAcc(s18, 1800, {
+    tasks: { unfollow: true, follow: true },
+    sources: { fans: true, search: false, ups: false },
+    delayMin: 1000, delayMax: 1000, maxOps: 10, dryRun: false, skipOfficial: false
+  });
+  {
+    const e18 = new Engine(s18);
+    const logs18 = [];
+    e18.on('log', (l) => logs18.push(l.msg));
+    e18.startAll([a18.id]);
+    await waitIdle(e18);
+    await t('关注数达上限：取关照常、自动关注被跳过并提示', () => {
+      assert.ok(actions.some((x) => x.fid === 19001 && x.act === 2), '单向关注应被取关');
+      assert.strictEqual(actions.filter((x) => x.act === 1).length, 0, '已达上限，不应再发起关注');
+      assert.ok(logs18.some((m) => /关注数已达上限/.test(m)), '应有「已达上限」提示日志');
+    });
+  }
+  // 未达上限时关注照常
+  s18.updateGlobal({ followCap: 1000 });
+  FIX.stat = { following: 200, follower: 100 };
+  FIX.followings['1800'] = [];
+  {
+    const e18b = new Engine(s18);
+    e18b.startAll([a18.id]);
+    await waitIdle(e18b);
+    await t('未达上限时自动关注照常执行', () => {
+      assert.ok(actions.some((x) => x.fid === 19002 && x.act === 1), '未达上限应正常回粉');
+    });
+  }
+  FIX.stat = { following: 100, follower: 50 };
+
   console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
   process.exit(fail ? 1 : 0);
 })();

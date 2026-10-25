@@ -167,6 +167,11 @@
           <label class="lbl">统计刷新</label>
           <input type="number" id="g-statint" min="1" max="60"> 分钟
         </div>
+        <div class="row">
+          <label class="lbl">关注上限保护</label>
+          <input type="number" id="g-followcap" min="0" max="100000" step="100"> 人
+          <span class="hint">关注数达到该值就跳过「自动关注」，防止被 B 站拒绝；普通账号 5000，大会员可调高；0 = 关闭</span>
+        </div>
         <div class="row col">
           <label class="lbl">全局白名单 UID（逗号/空格/换行分隔，对所有账号生效）</label>
           <textarea id="g-white" rows="2" placeholder="例如：123456 889900"></textarea>

@@ -264,7 +264,8 @@ async function doSaveGlobal() {
     rateThreshold: clampInt($('#g-threshold').value, 0, 100, 15) / 100,
     rateMinSample: clampInt($('#g-sample').value, 5, 500, 20),
     rateVerifyGapHours: clampInt($('#g-gap').value, 1, 168, 24),
-    statIntervalMin: clampInt($('#g-statint').value, 1, 60, 5)
+    statIntervalMin: clampInt($('#g-statint').value, 1, 60, 5),
+    followCap: clampInt($('#g-followcap').value, 0, 100000, 5000)
   };
   const never = String($('#g-never').value || '').split(/[\s,，;；\n]+/).filter(Boolean);
   const r = await window.api.updateGlobal(g);
@@ -383,6 +384,7 @@ function fillGlobalForm() {
   $('#g-sample').value = g.rateMinSample || 20;
   $('#g-gap').value = g.rateVerifyGapHours || 24;
   $('#g-statint').value = g.statIntervalMin || 5;
+  $('#g-followcap').value = (g.followCap == null ? 5000 : g.followCap);
   $('#g-autostart').checked = !!(g.autoStartOnLaunch);
   $('#never-count').textContent = `　共 ${(g.neverFollow || []).length} 个`;
 }

@@ -87,7 +87,8 @@ const DEFAULT_GLOBAL = {
   rateVerifyGapHours: 24,  // 关注后至少多久才核验对方是否回关
   pageGap: 1200,           // 翻页间隔(ms)
   statIntervalMin: 5,      // 关注/粉丝数实时刷新间隔(分钟)
-  autoStartOnLaunch: false // 应用启动时，自动恢复「有任务且未禁用」的账号（需用户主动开启）
+  autoStartOnLaunch: false, // 应用启动时，自动恢复「有任务且未禁用」的账号（需用户主动开启）
+  followCap: 5000          // 关注上限保护：关注数达到该值就跳过「自动关注」，防止被 B 站拒绝（普通账号 5000，大会员可调高；0 = 关闭）
 };
 
 class Store {
