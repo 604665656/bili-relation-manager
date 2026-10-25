@@ -18,6 +18,8 @@ async function boot() {
   window.api.onStats(onStats);
   window.api.onLive(onLive);
   window.api.onBusy((d) => setStatus(d.busy ? '任务运行中…' : '就绪'));
+  // 菜单「帮助 → 联系合作 / 打赏支持」
+  if (window.api.onMenuOpenSupport) window.api.onMenuOpenSupport(() => openSupport());
 }
 
 async function reloadState() {

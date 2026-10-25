@@ -40,5 +40,6 @@ contextBridge.exposeInMainWorld('api', {
   onAccount: (cb) => subscribe('bus:account', cb),
   onStats: (cb) => subscribe('bus:stats', cb),
   onLive: (cb) => subscribe('bus:live', cb),
-  onBusy: (cb) => subscribe('bus:busy', cb)
+  onBusy: (cb) => subscribe('bus:busy', cb),
+  onMenuOpenSupport: (cb) => subscribe('menu:openSupport', cb)
 });

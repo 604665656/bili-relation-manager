@@ -1,6 +1,6 @@
 'use strict';
 /** Electron 主进程 */
-const { app, BrowserWindow, ipcMain, session, dialog, shell, Menu, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -10,7 +10,7 @@ const { Engine, sourceLabel, accountsToAutoStart } = require('./src/task');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-21 19:45 联系合作 + 打赏支持';
+const BUILD_TAG = '2026-10-25 10:45 中文应用菜单';
 let store, engine, mainWindow = null, loginWindow = null;
 
 app.disableHardwareAcceleration();
@@ -414,21 +414,118 @@ function registerIPC() {
     return { busy: engine.isBusy() };
   }));
 
-  ipcMain.handle('app:exportCsv', safe('app:exportCsv', async () => {
-    const win = mainWindow;
-    if (!win) return { ok: false };
-    const res = await dialog.showSaveDialog(win, {
-      title: '导出操作记录',
-      defaultPath: path.join(app.getPath('downloads'), `bili_relation_${Date.now()}.csv`),
-      filters: [{ name: 'CSV', extensions: ['csv'] }]
-    });
-    if (res.canceled || !res.filePath) return { ok: false };
-    try {
-      const csv = buildCsv();
-      fs.writeFileSync(res.filePath, csv, 'utf8');
-      return { ok: true, path: res.filePath, rows: engineRecords.length };
-    } catch (e) { return { ok: false, error: e.message }; }
-  }));
+  ipcMain.handle('app:exportCsv', safe('app:exportCsv', async () => exportCsvNow()));
+}
+
+/** 导出操作记录（IPC 与菜单共用） */
+async function exportCsvNow() {
+  const win = mainWindow;
+  if (!win) return { ok: false };
+  const res = await dialog.showSaveDialog(win, {
+    title: '导出操作记录',
+    defaultPath: path.join(app.getPath('downloads'), `bili_relation_${Date.now()}.csv`),
+    filters: [{ name: 'CSV', extensions: ['csv'] }]
+  });
+  if (res.canceled || !res.filePath) return { ok: false };
+  try {
+    const csv = buildCsv();
+    fs.writeFileSync(res.filePath, csv, 'utf8');
+    sendLog('ok', `已导出 ${engineRecords.length} 条操作记录 → ${res.filePath}`);
+    return { ok: true, path: res.filePath, rows: engineRecords.length };
+  } catch (e) {
+    sendLog('error', '导出失败：' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/* ══════════════ 应用菜单（中文） ══════════════ */
+function buildAppMenu() {
+  const send = (ch) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(ch); };
+  const reload = () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload(); };
+  const forceReload = () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reloadIgnoringCache(); };
+  const devtools = () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.toggleDevTools(); };
+
+  const template = [
+    {
+      label: '文件',
+      submenu: [
+        { label: '重新加载界面', accelerator: 'CmdOrCtrl+R', click: reload },
+        { label: '强制重新加载', accelerator: 'CmdOrCtrl+Shift+R', click: forceReload },
+        { type: 'separator' },
+        { label: '导出操作记录（CSV）…', click: () => exportCsvNow() },
+        { label: '打开数据目录', click: () => { try { shell.openPath(store.dir); } catch (e) { /* ignore */ } } },
+        { type: 'separator' },
+        { label: '退出', role: 'quit' }
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { label: '撤销', accelerator: 'CmdOrCtrl+Z', role: 'undo' },
+        { label: '重做', accelerator: 'CmdOrCtrl+Shift+Z', role: 'redo' },
+        { type: 'separator' },
+        { label: '剪切', accelerator: 'CmdOrCtrl+X', role: 'cut' },
+        { label: '复制', accelerator: 'CmdOrCtrl+C', role: 'copy' },
+        { label: '粘贴', accelerator: 'CmdOrCtrl+V', role: 'paste' },
+        { label: '全选', accelerator: 'CmdOrCtrl+A', role: 'selectAll' }
+      ]
+    },
+    {
+      label: '视图',
+      submenu: [
+        { label: '重新加载界面', accelerator: 'CmdOrCtrl+R', click: reload },
+        { label: '强制重新加载', accelerator: 'CmdOrCtrl+Shift+R', click: forceReload },
+        { label: '开发者工具', accelerator: 'CmdOrCtrl+Shift+I', click: devtools },
+        { type: 'separator' },
+        { label: '实际大小', accelerator: 'CmdOrCtrl+0', role: 'resetZoom' },
+        { label: '放大', accelerator: 'CmdOrCtrl+=', role: 'zoomIn' },
+        { label: '缩小', accelerator: 'CmdOrCtrl+-', role: 'zoomOut' },
+        { type: 'separator' },
+        { label: '切换全屏', accelerator: 'F11', role: 'togglefullscreen' }
+      ]
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { label: '最小化', role: 'minimize' },
+        { label: '关闭窗口', accelerator: 'CmdOrCtrl+W', role: 'close' }
+      ]
+    },
+    {
+      label: '帮助',
+      submenu: [
+        { label: '使用说明 / 风险提示', click: showHelpDialog },
+        { label: '联系合作 / 打赏支持', click: () => send('menu:openSupport') },
+        { type: 'separator' },
+        { label: '打开项目主页（GitHub）', click: () => { try { shell.openExternal('https://github.com/604665656/bili-relation-manager'); } catch (e) { /* ignore */ } } },
+        { type: 'separator' },
+        { label: '关于 B站关注管理台', click: showAboutDialog }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function showHelpDialog() {
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: '使用说明 / 风险提示',
+    message: '批量操作属自动化行为，可能被平台识别。',
+    detail: '建议：单次 ≤ 50、操作间隔 ≥ 3 秒；出现 -509（请求频繁）或 -352（风控）立即停止并等待数小时。\n\n默认「演练模式」只列名单、不真正执行，确认无误后再关闭演练模式。\n\n所有账号凭证与数据只保存在你本机，不上传任何服务器。',
+    buttons: ['知道了'],
+    noLink: true
+  });
+}
+
+function showAboutDialog() {
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: '关于',
+    message: 'B站关注管理台',
+    detail: `版本 v${app.getVersion()}\n构建 ${BUILD_TAG}\n\n多账号并行 · 数据本地存储 · 完全免费\n\n项目主页：https://github.com/604665656/bili-relation-manager`,
+    buttons: ['确定'],
+    noLink: true
+  });
 }
 
 function escapeCell(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }
@@ -473,10 +570,10 @@ function hookRecords() {
 
 /* ══════════════ 生命周期 ══════════════ */
 app.whenReady().then(async () => {
-  Menu.setApplicationMenu(null);
   init();
   registerIPC();
   hookRecords();
+  buildAppMenu();   // 中文应用菜单（文件/编辑/视图/窗口/帮助）
 
   // 自检模式：不起界面，验证主进程各模块可正常装载（打包后可用 EXE --selftest 验证完整性）
   if (process.argv.includes('--selftest')) {
@@ -523,9 +620,7 @@ app.whenReady().then(async () => {
   setInterval(() => { try { store.flush(); } catch (e) { /* ignore */ } }, 3000);
   app.on('before-quit', () => { try { store.flush(); } catch (e) { /* ignore */ } });
 
-  globalShortcut.register('CommandOrControl+Shift+I', () => {
-    if (mainWindow) mainWindow.webContents.toggleDevTools();
-  });
+  // 开发者工具快捷键已由「视图」菜单提供（Ctrl+Shift+I），此处不再重复注册，避免双触发
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
