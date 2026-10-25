@@ -48,6 +48,10 @@ const DEFAULT_ACCOUNT_CFG = {
   onlyAfterDays: false,  // 是否启用天数门槛
   minFollowDays: 7,      // 门槛天数
 
+  // ── 满关自救（避免撞关注上限，保证每天都能清理）──
+  capGuard: true,        // 关注数达到「全局上限 − 预留」时：① 自动关注暂停 ② 清理忽略天数门槛立即腾名额
+  capGuardReserve: 100,  // 自救触发预留：距关注上限还剩多少名额时触发（0 = 只有满了才触发）
+
   // ── 指定 UP 的粉丝（sources.ups 打开时才需要）──
   targetUps: ''          // 目标 UP 的 UID，逗号/空格分隔
 };

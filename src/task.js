@@ -323,20 +323,24 @@ class Engine extends EventEmitter {
     if (T.unfollow) await this._phaseUnfollow(acc, run, client);
 
     if (T.follow && !run.cancel) {
-      // ── 关注上限保护 ──
+      // ── 关注上限保护 / 满关自救 ──
       // B站普通账号关注上限 5000，满了之后任何关注请求都会被拒（22016）。
-      // 这里先取关（上面已跑）再复核当前关注数：达到上限就跳过关注阶段，
-      // 既避免硬闯触发致命错误，也提示用户先「清理单向关注」腾名额。
+      // 开启「满关自救」时，暂停线提前到「上限 − 预留」：留出缓冲名额，
+      // 既避免硬闯触发致命错误，也保证清理阶段每天都有名额可腾。
       const cap = Number((this.store.get().global || {}).followCap) || 0;
+      const reserve = (cfg.capGuard !== false) ? Math.max(0, Number(cfg.capGuardReserve) || 0) : 0;
+      const blockAt = cap > 0 ? Math.max(0, cap - reserve) : 0;
       let followBlocked = false;
       if (cap > 0) {
         const s = await client.stat(client.mid);
         const cur = (s && s.code === 0) ? s.following : null;
-        if (cur != null && cur >= cap) {
+        if (cur != null && cur >= blockAt) {
           followBlocked = true;
-          this._log(id, 'warn', `关注数已达上限 ${cur}（≥ ${cap}），本轮跳过「自动关注」以免被 B 站拒绝；请先「清理单向关注」释放名额`);
-        } else if (cur != null && cur >= cap - 100) {
-          this._log(id, 'warn', `关注数 ${cur} 已接近上限 ${cap}，建议优先「清理单向关注」腾出名额`);
+          const guardTxt = (reserve > 0 && blockAt < cap) ? `（满关自救：上限 ${cap} − 预留 ${reserve}）` : '';
+          this._log(id, 'warn', `关注数已达上限 ${cur}（≥ ${blockAt}）${guardTxt}，本轮跳过「自动关注」以免被 B 站拒绝；请先「清理单向关注」释放名额`);
+        } else if (cur != null && cur >= blockAt - 100) {
+          const lineTxt = (reserve > 0 && blockAt < cap) ? `（满关自救线 ${blockAt}）` : '';
+          this._log(id, 'warn', `关注数 ${cur} 已接近上限 ${cap}${lineTxt}，建议优先「清理单向关注」腾出名额`);
         }
       }
       if (!followBlocked) {
@@ -392,11 +396,32 @@ class Engine extends EventEmitter {
     return cur.daily.ops < cap;
   }
 
-  /* ══════════ 阶段一：清理单向关注（可限制关注满 N 天） ══════════ */
+  /* ══════════ 阶段一：清理单向关注（可限制关注满 N 天；满关时自救立即清） ══════════ */
   async _phaseUnfollow(acc, run, client) {
     const cfg = acc.cfg;
     run.stats.phase = MODE_NAME.unfollow;
-    this._log(acc.id, 'info', `—— 进入：${MODE_NAME.unfollow}${cfg.onlyAfterDays ? `（仅处理关注满 ${cfg.minFollowDays} 天）` : ''} ——`);
+
+    // ── 满关自救 ──
+    // 关注数贴近上限时，忽略「关注满 N 天」门槛立即清理：
+    // 满员账号最缺的就是名额，等 N 天只会一直撞上限；立即清才能保证每天都能腾出名额。
+    const g = this.store.get().global || {};
+    const cap = Number(g.followCap) || 0;
+    const reserve = (cfg.capGuard !== false) ? Math.max(0, Number(cfg.capGuardReserve) || 0) : 0;
+    const guardAt = cap > 0 ? Math.max(0, cap - reserve) : 0;
+    let guard = false;
+    if (cfg.capGuard !== false && cap > 0) {
+      try {
+        const s = await client.stat(client.mid);
+        const cur = (s && s.code === 0) ? s.following : null;
+        if (cur != null && cur >= guardAt) {
+          guard = true;
+          this._log(acc.id, 'warn', `关注数 ${cur} 已达满关自救线 ${guardAt}（上限 ${cap} − 预留 ${reserve}）：本轮忽略「关注满 ${cfg.minFollowDays} 天」门槛立即清理，保证每天都能腾名额`);
+        }
+      } catch (e) { /* 统计失败不阻塞清理，按普通模式执行 */ }
+    }
+    const effOnlyAfterDays = !!cfg.onlyAfterDays && !guard;
+
+    this._log(acc.id, 'info', `—— 进入：${MODE_NAME.unfollow}${effOnlyAfterDays ? `（仅处理关注满 ${cfg.minFollowDays} 天）` : ''}${guard ? '｜【满关自救】立即清理' : ''} ——`);
 
     let done = 0, pn = 1, total = Infinity;
     const nowSec = Date.now() / 1000;
@@ -428,8 +453,8 @@ class Engine extends EventEmitter {
         if (attr & BLOCKED) { this._push(acc.id, { uname: it.uname, mid: it.mid, result: '跳过', detail: '已拉黑' }); continue; }
         if (attr & MUTUAL) continue; // 已互粉
 
-        // ── 关注时长门槛 ──
-        if (cfg.onlyAfterDays) {
+        // ── 关注时长门槛（满关自救时忽略，立即清理腾名额）──
+        if (effOnlyAfterDays) {
           const mtime = Number(it.mtime) || 0;
           if (!mtime) {
             this._push(acc.id, { uname: it.uname, mid: it.mid, result: '跳过', detail: '接口未返回关注时间' });

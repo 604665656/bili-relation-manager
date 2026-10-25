@@ -7,11 +7,12 @@ const fs = require('fs');
 const { Store } = require('./src/store');
 const { BiliClient } = require('./src/bilibili');
 const { Engine, sourceLabel, accountsToAutoStart } = require('./src/task');
+const { Updater } = require('./src/updater');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-25 11:00 关注上限保护';
-let store, engine, mainWindow = null, loginWindow = null;
+const BUILD_TAG = '2026-10-25 12:00 满关自救 + 应用内热更新';
+let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 app.disableHardwareAcceleration();
 app.setAppUserModelId && app.setAppUserModelId('com.local.bili.relation.manager');
@@ -415,6 +416,28 @@ function registerIPC() {
   }));
 
   ipcMain.handle('app:exportCsv', safe('app:exportCsv', async () => exportCsvNow()));
+
+  // ── 热更新 ──
+  const emitUpdater = (ev) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('updater:event', ev); } catch (e) { /* ignore */ }
+    }
+  };
+  ipcMain.handle('updater:check', safe('updater:check', async () => {
+    if (!updater) return { hasUpdate: false, error: '更新模块未就绪' };
+    const r = await updater.check();
+    if (r.hasUpdate) {
+      emitUpdater({ type: 'available', version: r.version, current: r.current, notes: r.notes, asset: r.asset, pageUrl: r.pageUrl });
+      sendLog('ok', `发现新版本 v${r.version}（当前 v${r.current}），可在弹窗中一键更新`);
+    } else if (r.error) {
+      sendLog('warn', r.error);
+    }
+    return r;
+  }));
+  ipcMain.handle('updater:apply', safe('updater:apply', async () => {
+    if (!updater) return { ok: false, error: '更新模块未就绪' };
+    return await updater.downloadAndApply();
+  }));
 }
 
 /** 导出操作记录（IPC 与菜单共用） */
@@ -494,6 +517,7 @@ function buildAppMenu() {
     {
       label: '帮助',
       submenu: [
+        { label: '检查更新…', click: () => send('menu:checkUpdate') },
         { label: '使用说明 / 风险提示', click: showHelpDialog },
         { label: '联系合作 / 打赏支持', click: () => send('menu:openSupport') },
         { type: 'separator' },
@@ -575,6 +599,13 @@ app.whenReady().then(async () => {
   hookRecords();
   buildAppMenu();   // 中文应用菜单（文件/编辑/视图/窗口/帮助）
 
+  // 热更新：事件统一转发给渲染进程（available/progress/status/error）
+  updater = new Updater({ onEvent: (ev) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('updater:event', ev); } catch (e) { /* ignore */ }
+    }
+  }});
+
   // 自检模式：不起界面，验证主进程各模块可正常装载（打包后可用 EXE --selftest 验证完整性）
   if (process.argv.includes('--selftest')) {
     const problems = [];
@@ -582,6 +613,12 @@ app.whenReady().then(async () => {
     check('store', () => { store.load(); store.listAccounts(); });
     check('engine', () => { if (!engine || typeof engine.startAll !== 'function') throw new Error('engine 未初始化'); });
     check('bilibili', () => { new BiliClient('SESSDATA=a; bili_jct=b; DedeUserID=1'); });
+    check('updater', () => {
+      if (typeof Updater !== 'function') throw new Error('Updater 未导出');
+      const core = require('./src/updater-core');
+      if (core.compareVer('2.1.6', '2.1.7') >= 0) throw new Error('版本比较逻辑异常');
+      if (!core.pickAsset([{ name: 'x-便携版.exe', size: 1 }])) throw new Error('资产挑选逻辑异常');
+    });
     check('renderer资源', () => {
       fs.accessSync(path.join(__dirname, 'renderer', 'index.html'));
       fs.accessSync(path.join(__dirname, 'renderer', 'app.js'));
@@ -598,6 +635,24 @@ app.whenReady().then(async () => {
   }
 
   createMainWindow();
+
+  // 热更新：启动 6 秒后静默检查一次 GitHub Releases（不打绕用户），
+  // 发现新版时由渲染进程弹窗提示，用户点「立即更新并重启」才会下载替换。
+  setTimeout(() => {
+    updater.check().then((r) => {
+      if (r.hasUpdate) {
+        sendLog('ok', `发现新版本 v${r.version}（当前 v${r.current}），按弹窗提示可一键热更新`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          try {
+            mainWindow.webContents.send('updater:event', {
+              type: 'available', version: r.version, current: r.current,
+              notes: r.notes, asset: r.asset, pageUrl: r.pageUrl
+            });
+          } catch (e) { /* ignore */ }
+        }
+      }
+    }).catch(() => { /* 检查失败静默忽略，不打扰用户 */ });
+  }, 6000);
 
   // 启动时自动恢复：若用户在全局设置中开启「启动时自动恢复任务」，
   // 则按上次配置自动启动「有任务且未禁用」的账号——软件第二天 / 崩溃重启后无需手动点「开始」。

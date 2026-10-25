@@ -35,11 +35,16 @@ contextBridge.exposeInMainWorld('api', {
 
   exportCsv: () => invoke('app:exportCsv'),
 
+  updaterCheck: () => invoke('updater:check'),
+  updaterApply: () => invoke('updater:apply'),
+
   onLog: (cb) => subscribe('bus:log', cb),
   onRecord: (cb) => subscribe('bus:record', cb),
   onAccount: (cb) => subscribe('bus:account', cb),
   onStats: (cb) => subscribe('bus:stats', cb),
   onLive: (cb) => subscribe('bus:live', cb),
   onBusy: (cb) => subscribe('bus:busy', cb),
-  onMenuOpenSupport: (cb) => subscribe('menu:openSupport', cb)
+  onMenuOpenSupport: (cb) => subscribe('menu:openSupport', cb),
+  onMenuCheckUpdate: (cb) => subscribe('menu:checkUpdate', cb),
+  onUpdaterEvent: (cb) => subscribe('updater:event', cb)
 });

@@ -4,12 +4,13 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 
-const ST = { accounts: [], global: {}, selected: null, records: [], logs: [] };
+const ST = { accounts: [], global: {}, selected: null, records: [], logs: [], busy: false };
+const UPD = { info: null, busy: false };   // 热更新状态
 
 /* ─────────── 启动 ─────────── */
 async function boot() {
   // 启动第一件事：强制隐藏所有浮层，绝不依赖样式表
-  ['#modal-import', '#modal-support', '#login-bar'].forEach((sel) => hideEl($(sel)));
+  ['#modal-import', '#modal-support', '#modal-update', '#login-bar'].forEach((sel) => hideEl($(sel)));
   wireEvents();
   await reloadState();
   window.api.onLog(onLog);
@@ -17,9 +18,13 @@ async function boot() {
   window.api.onAccount(onAccountState);
   window.api.onStats(onStats);
   window.api.onLive(onLive);
-  window.api.onBusy((d) => setStatus(d.busy ? '任务运行中…' : '就绪'));
+  window.api.onBusy((d) => { ST.busy = !!d.busy; setStatus(d.busy ? '任务运行中…' : '就绪'); });
   // 菜单「帮助 → 联系合作 / 打赏支持」
   if (window.api.onMenuOpenSupport) window.api.onMenuOpenSupport(() => openSupport());
+  // 菜单「帮助 → 检查更新…」
+  if (window.api.onMenuCheckUpdate) window.api.onMenuCheckUpdate(() => doCheckUpdate());
+  // 热更新事件（启动静默检查 / 下载进度 / 出错）
+  if (window.api.onUpdaterEvent) window.api.onUpdaterEvent(onUpdaterEvent);
 }
 
 async function reloadState() {
@@ -62,11 +67,20 @@ function wireEvents() {
   $('#btn-support').onclick = openSupport;
   $('#btn-support-close').onclick = closeSupport;
   $('#modal-support').onclick = (e) => { if (e.target === $('#modal-support')) closeSupport(); };
+  // 热更新弹窗
+  $('#btn-update-now').onclick = doApplyUpdate;
+  $('#btn-update-later').onclick = () => {
+    const v = UPD.info && UPD.info.version;
+    if (v) { try { localStorage.setItem('brm-skip-ver', v); } catch (e) { /* ignore */ } }
+    closeUpdate();
+  };
+  $('#modal-update').onclick = (e) => { if (e.target === $('#modal-update')) closeUpdate(); };
   // Esc 关闭弹窗 / 收起登录提示条
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       closeImport();
       closeSupport();
+      closeUpdate();
       hideEl($('#login-bar'));
     }
   });
@@ -95,10 +109,10 @@ function wireEvents() {
 
   // 配置自动保存
   ['#cfg-min', '#cfg-max', '#cfg-limit', '#cfg-targets', '#cfg-days-n', '#cfg-loop-min', '#cfg-daily', '#cfg-errretry',
-    '#cfg-watchdog',
+    '#cfg-watchdog', '#cfg-capguard-reserve',
     '#cfg-keywords', '#cfg-searchpages', '#cfg-maxfans', '#cfg-minlevel']
     .forEach((sel) => $(sel).addEventListener('change', autoSaveCfg));
-  ['#cfg-official', '#cfg-special', '#cfg-dry', '#cfg-days', '#cfg-loop']
+  ['#cfg-official', '#cfg-special', '#cfg-dry', '#cfg-days', '#cfg-loop', '#cfg-capguard']
     .forEach((sel) => $(sel).addEventListener('change', () => { autoSaveCfg(); renderSelected(); }));
   // 任务类型 / 来源都是多选：勾完立刻存盘并刷新可见行
   ['#task-unfollow', '#task-follow', '#src-fans', '#src-search', '#src-ups']
@@ -141,6 +155,8 @@ function readCfgForm() {
     watchdogStallMin: clampInt($('#cfg-watchdog').value, 0, 240, 15),
     onlyAfterDays: $('#cfg-days').checked,
     minFollowDays: clampInt($('#cfg-days-n').value, 1, 365, 7),
+    capGuard: $('#cfg-capguard').checked,
+    capGuardReserve: clampInt($('#cfg-capguard-reserve').value, 0, 4900, 100),
     targetUps: String($('#cfg-targets').value || '').trim()
   };
 }
@@ -214,6 +230,76 @@ function closeImport() { hideEl($('#modal-import')); }
 
 function openSupport() { showEl($('#modal-support')); }
 function closeSupport() { hideEl($('#modal-support')); }
+
+/* ─────────── 热更新 ─────────── */
+function openUpdate(info) {
+  UPD.info = info || null;
+  $('#upd-cur').textContent = 'v' + ((info && info.current) || '?');
+  $('#upd-new').textContent = 'v' + ((info && info.version) || '?');
+  $('#upd-notes').textContent = (info && info.notes) ? String(info.notes).replace(/\r/g, '') : '（无更新说明）';
+  $('#upd-status').textContent = '';
+  $('#btn-update-now').disabled = false;
+  $('#btn-update-now').textContent = '立即更新并重启';
+  $('#btn-update-later').disabled = false;
+  hideEl($('#upd-prog'));
+  showEl($('#modal-update'));
+}
+function closeUpdate() {
+  if (UPD.busy) return;   // 下载中不允许关
+  hideEl($('#modal-update'));
+}
+
+async function doCheckUpdate() {
+  setStatus('正在检查更新…');
+  let r = null;
+  try { r = await window.api.updaterCheck(); }
+  catch (e) { r = { hasUpdate: false, error: String(e && e.message || e) }; }
+  if (r && r.hasUpdate) {
+    openUpdate(r);
+    setStatus(`发现新版本 v${r.version}`);
+  } else {
+    const msg = (r && r.error) ? r.error : `已是最新版本 v${(r && r.version) || ''}`;
+    setStatus(msg);
+    toast(msg);
+  }
+}
+
+async function doApplyUpdate() {
+  if (UPD.busy) return;
+  if (ST.busy && !confirm('当前有账号任务正在运行，热更新会中断它们。确定仍要更新吗？')) return;
+  UPD.busy = true;
+  $('#btn-update-now').disabled = true;
+  $('#btn-update-now').textContent = '正在更新…';
+  $('#btn-update-later').disabled = true;
+  $('#upd-status').textContent = '正在连接 GitHub…';
+  showEl($('#upd-prog'), 'flex');
+  try { await window.api.updaterApply(); }
+  catch (e) { /* 错误经 onUpdaterEvent 展示 */ }
+}
+
+function onUpdaterEvent(ev) {
+  if (!ev || !ev.type) return;
+  if (ev.type === 'available') {
+    // 同一版本被「稍后再说」跳过就不再自动弹
+    let skipped = null;
+    try { skipped = localStorage.getItem('brm-skip-ver'); } catch (e) { /* ignore */ }
+    if (skipped && skipped === ev.version) { setStatus(`有新版本 v${ev.version}（已设置跳过提醒）`); return; }
+    openUpdate(ev);
+  } else if (ev.type === 'progress') {
+    const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
+    $('#upd-pct').textContent = ev.pct != null ? `${ev.pct}%` : `已下载 ${mb(ev.received || 0)}`;
+    $('#upd-bar-in').style.width = (ev.pct != null ? ev.pct : 8) + '%';
+  } else if (ev.type === 'status') {
+    if (ev.msg) $('#upd-status').textContent = ev.msg;
+  } else if (ev.type === 'error') {
+    UPD.busy = false;
+    $('#btn-update-now').disabled = false;
+    $('#btn-update-now').textContent = '重试更新';
+    $('#btn-update-later').disabled = false;
+    $('#upd-status').textContent = '更新失败：' + (ev.msg || '未知错误');
+    setStatus('更新失败：' + (ev.msg || '未知错误'));
+  }
+}
 
 async function doImport() {
   const raw = $('#import-cookie').value.trim();
@@ -354,6 +440,8 @@ function renderSelected() {
   $('#cfg-special').checked = !!cfg.skipSpecial;
   $('#cfg-days').checked = !!cfg.onlyAfterDays;
   $('#cfg-days-n').value = cfg.minFollowDays || 7;
+  $('#cfg-capguard').checked = cfg.capGuard !== false;
+  $('#cfg-capguard-reserve').value = (cfg.capGuardReserve == null ? 100 : cfg.capGuardReserve);
   $('#cfg-loop').checked = !!cfg.autoLoop;
   $('#cfg-loop-min').value = cfg.loopIntervalMin || 30;
   $('#cfg-daily').value = cfg.dailyCap || 0;

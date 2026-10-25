@@ -93,6 +93,8 @@ async function t(name, fn) {
     assert.strictEqual(a.cfg.onlyAfterDays, false);
     assert.strictEqual(a.cfg.minFollowDays, 7);
     assert.strictEqual(a.cfg.targetUps, '');
+    assert.strictEqual(a.cfg.capGuard, true, '满关自救应默认开启');
+    assert.strictEqual(a.cfg.capGuardReserve, 100, '默认预留 100 名额');
   });
   await t('任务类型/来源默认为多选对象', () => {
     const s = new Store(dir); s.load();
@@ -165,6 +167,34 @@ async function t(name, fn) {
     const s2 = new Store(dir); s2.load();
     assert.deepStrictEqual(s2.get().global.whiteList, ['111', '222']);
     assert.strictEqual(s2.get().global.pageGap, 2000);
+  });
+
+  console.log('\n[4] 热更新核心逻辑');
+  const { parseVer, compareVer, pickAsset } = require('../src/updater-core');
+  await t('版本号解析与比较', () => {
+    assert.deepStrictEqual(parseVer('v2.1.7'), { major: 2, minor: 1, patch: 7 });
+    assert.deepStrictEqual(parseVer('2.1.7-beta'), { major: 2, minor: 1, patch: 7 });
+    assert.strictEqual(parseVer('abc'), null);
+    assert.strictEqual(parseVer(''), null);
+    assert.strictEqual(parseVer(null), null);
+    assert.ok(compareVer('2.1.6', '2.1.7') < 0, '小版本应判为旧');
+    assert.strictEqual(compareVer('2.1.7', 'v2.1.7'), 0, '同版本不应提示更新');
+    assert.ok(compareVer('2.10.0', '2.9.9') > 0, '必须按数值比较（2.10.0 > 2.9.9）');
+    assert.ok(compareVer('3.0.0', '2.9.9') > 0, '主版本优先');
+    assert.strictEqual(compareVer('x', '2.1.7'), 0, '无法解析时不误升级');
+  });
+  await t('安装包挑选：优先便携版单文件 EXE', () => {
+    const assets = [
+      { name: 'B站关注管理台-2.1.7.exe', size: 100, browser_download_url: 'u1' },
+      { name: 'B站关注管理台-2.1.7-便携版.exe', size: 90, browser_download_url: 'u2' },
+      { name: 'B站关注管理台-2.1.7.exe.blockmap', size: 1, browser_download_url: 'u3' }
+    ];
+    assert.strictEqual(pickAsset(assets).name, 'B站关注管理台-2.1.7-便携版.exe');
+    assert.strictEqual(pickAsset([]), null);
+    assert.strictEqual(pickAsset(null), null);
+    assert.strictEqual(pickAsset([{ name: 'x.zip', size: 5 }]), null, '非 exe 不选');
+    const only = [{ name: 'a.exe', size: 10 }, { name: 'b.exe', size: 20 }];
+    assert.strictEqual(pickAsset(only).name, 'b.exe', '无便携版时取最大的');
   });
 
   console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);

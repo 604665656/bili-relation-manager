@@ -119,5 +119,36 @@ t('表单读写覆盖新的多选字段', () => {
   assert.ok(/\$\('#src-search'\)\.checked\s*=\s*!!S\.search/.test(js), 'renderSelected 未回填 sources');
 });
 
+console.log('\n[满关自救与热更新]');
+
+t('满关自救配置项齐全且被读写', () => {
+  for (const id of ['cfg-capguard', 'cfg-capguard-reserve']) {
+    assert.ok(htmlIds.has(id), `缺少配置项 #${id}`);
+  }
+  assert.ok(/capGuard:/.test(js) && /capGuardReserve:/.test(js), 'readCfgForm 未读写满关自救配置');
+  assert.ok(/\$\('#cfg-capguard'\)\.checked/.test(js), 'renderSelected 未回填 capGuard');
+  assert.ok(/\$\('#cfg-capguard-reserve'\)\.value/.test(js), 'renderSelected 未回填 capGuardReserve');
+});
+
+t('热更新弹窗与交互就位', () => {
+  assert.ok(/<div class="modal" id="modal-update" hidden>/.test(html), '更新弹窗初始应带 hidden');
+  for (const id of ['upd-cur', 'upd-new', 'upd-notes', 'upd-prog', 'upd-bar-in', 'upd-pct', 'upd-status', 'btn-update-now', 'btn-update-later']) {
+    assert.ok(htmlIds.has(id), `更新弹窗缺少 #${id}`);
+  }
+  assert.ok(/function openUpdate\(/.test(js), '缺少 openUpdate');
+  assert.ok(/function closeUpdate\(/.test(js), '缺少 closeUpdate');
+  assert.ok(/function doApplyUpdate\(/.test(js), '缺少 doApplyUpdate');
+  assert.ok(/function onUpdaterEvent\(/.test(js), '缺少 onUpdaterEvent');
+  assert.ok(/onUpdaterEvent/.test(js) && /onMenuCheckUpdate/.test(js), 'app.js 未订阅更新相关事件');
+  assert.ok(/localStorage\.setItem\('brm-skip-ver'/.test(js), '缺少「稍后再说」版本跳过记录');
+});
+
+t('preload 暴露热更新 API', () => {
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+  for (const m of ['updaterCheck', 'updaterApply', 'onUpdaterEvent', 'onMenuCheckUpdate']) {
+    assert.ok(new RegExp(`\\b${m}:`).test(preload), 'preload 缺少 ' + m);
+  }
+});
+
 console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
 process.exit(fail ? 1 : 0);

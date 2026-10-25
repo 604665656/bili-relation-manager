@@ -714,6 +714,65 @@ async function t(name, fn) {
   }
   FIX.stat = { following: 100, follower: 50 };
 
+  /* ══════ [19] 满关自救（避免满关 · 保证每天可清） ══════ */
+  console.log('\n[19] 满关自救');
+  actions = [];
+  const s19 = mkStore({ followCap: 5000 });
+  FIX.stat = { following: 4950, follower: 100 };   // 距上限仅 50 → 触发自救（预留 100）
+  FIX.followings['2200'] = [item(22101, 2)];       // 单向关注，mtime=刚刚（0 天）
+  FIX.followers['2200'] = [item(22102, 0)];        // 回粉目标 → 应被暂停
+  const a19 = mkAcc(s19, 2200, {
+    tasks: { unfollow: true, follow: true },
+    sources: { fans: true, search: false, ups: false },
+    delayMin: 1000, delayMax: 1000, maxOps: 10, dryRun: false, skipOfficial: false,
+    onlyAfterDays: true, minFollowDays: 30, capGuard: true, capGuardReserve: 100
+  });
+  {
+    const e19 = new Engine(s19);
+    const logs19 = [];
+    e19.on('log', (l) => logs19.push(l.msg));
+    e19.startAll([a19.id]);
+    await waitIdle(e19);
+    await t('贴近上限：忽略天数门槛立即清理，同时暂停自动关注', () => {
+      assert.ok(actions.some((x) => x.fid === 22101 && x.act === 2), '满关自救应立即取关（不等 30 天）');
+      assert.strictEqual(actions.filter((x) => x.act === 1).length, 0, '贴近上限不应再发起关注');
+      assert.ok(logs19.some((m) => /满关自救/.test(m)), '应有满关自救日志');
+    });
+  }
+  // 关闭自救 → 天数门槛恢复（0 天的新关注不再被清）
+  // 注意换 UID：上一个用例真取关后已写入「不再关注名单」，同 UID 会先被名单拦截
+  s19.updateAccountCfg(a19.id, { capGuard: false });
+  FIX.followings['2200'] = [item(22103, 2)];
+  const n19b = actions.filter((x) => x.act === 2).length;
+  {
+    const e19b = new Engine(s19);
+    const recs19b = [];
+    e19b.on('record', (r) => recs19b.push(r));
+    e19b.startAll([a19.id]);
+    await waitIdle(e19b);
+    await t('关闭满关自救：恢复「关注满 30 天」门槛，未满则跳过', () => {
+      assert.strictEqual(actions.filter((x) => x.act === 2).length, n19b, '关闭自救后不应再取关');
+      assert.ok(recs19b.some((r) => r.mid === 22103 && /未满 30 天/.test(r.detail || '')), '应记录「关注仅 X 天，未满 30 天」');
+    });
+  }
+  // 开启自救但远离上限 → 门槛照常
+  s19.updateAccountCfg(a19.id, { capGuard: true });
+  FIX.stat = { following: 4000, follower: 100 };   // 距上限 1000 > 预留 100
+  FIX.followings['2200'] = [item(22104, 2)];
+  const n19c = actions.filter((x) => x.act === 2).length;
+  {
+    const e19c = new Engine(s19);
+    const recs19c = [];
+    e19c.on('record', (r) => recs19c.push(r));
+    e19c.startAll([a19.id]);
+    await waitIdle(e19c);
+    await t('开启自救但远离上限：天数门槛照常生效', () => {
+      assert.strictEqual(actions.filter((x) => x.act === 2).length, n19c, '远离上限时不应取关');
+      assert.ok(recs19c.some((r) => r.mid === 22104 && /未满 30 天/.test(r.detail || '')), '仍应按天数门槛跳过');
+    });
+  }
+  FIX.stat = { following: 100, follower: 50 };
+
   console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
   process.exit(fail ? 1 : 0);
 })();
