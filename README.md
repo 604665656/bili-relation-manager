@@ -110,17 +110,17 @@ npm run build      # 打包 Windows x64，产出 nsis 安装包 + portable 单�
 ## 发布新版本（触发应用内热更新）
 
 1. 改 `package.json` 的 `version` 与 `main.js` 的 `BUILD_TAG`，跑测试 + `npm run build`
-2. 打 tag 并创建 Release，把两个 EXE 作为资产上传（**必须带「便携版」资产**，热更新优先下载它）：
+2. 打 tag 并推送，创建 Release 后上传两个 EXE 作为资产：
 
 ```bash
 git tag v2.1.7 && git push origin v2.1.7
-gh release create v2.1.7 \
-  "dist/B站关注管理台-2.1.7-便携版.exe" \
-  "dist/B站关注管理台-2.1.7.exe" \
-  --title "v2.1.7 满关自救 + 应用内热更新" --notes "更新说明…"
+# 创建 Release（notes 自拟），然后用发布脚本上传资产：
+GH_TOKEN=<github token> node tools/publish-release.js
 ```
 
 3. 用户端：启动 6 秒后自动检查，发现新版即弹窗；点「立即更新并重启」自动完成替换。也可菜单「帮助 → 检查更新…」手动触发
+
+> 两个坑（已踩过）：① **GitHub 会剥掉资产名里的非 ASCII 字符**，中文名会变成 `B.-2.1.7-.exe`，所以资产一律用 ASCII 名 + `portable`/`setup` 标记，热更新靠这个标记挑「便携版」；② `uploads.github.com` 的 URL 拼装不要多加 `?`（`URL.search` 自带问号），否则报 `Invalid name for request`。
 
 ## 接口说明
 

@@ -28,13 +28,15 @@ function fmt(v) {
 /**
  * 挑要下载的资产：优先「便携版」单文件 EXE（用户实际在用的形态，替换最干净），
  * 没有便携版就取体积最大的 .exe；.blockmap 等辅助文件不算。
+ * 名称标记同时认中文「便携版」与 ASCII「portable」，防止资产名被环境转码后失配。
  */
 function pickAsset(assets) {
   const exes = (assets || []).filter((a) =>
     a && typeof a.name === 'string' && /\.exe$/i.test(a.name) && !/\.blockmap$/i.test(a.name));
   if (!exes.length) return null;
-  const portable = exes.find((a) => /便携版/.test(a.name));
+  const portable = exes.find((a) => /便携版|portable/i.test(a.name));
   if (portable) return portable;
+  if (exes.length === 1) return exes[0];
   return exes.slice().sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0))[0];
 }
 

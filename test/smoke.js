@@ -195,6 +195,13 @@ async function t(name, fn) {
     assert.strictEqual(pickAsset([{ name: 'x.zip', size: 5 }]), null, '非 exe 不选');
     const only = [{ name: 'a.exe', size: 10 }, { name: 'b.exe', size: 20 }];
     assert.strictEqual(pickAsset(only).name, 'b.exe', '无便携版时取最大的');
+    // GitHub 会剥掉资产名里的非 ASCII 字符 → 线上资产用 ASCII portable 标记，也要能认出来
+    const ascii = [
+      { name: 'bili-relation-manager-2.1.7-setup.exe', size: 200 },
+      { name: 'bili-relation-manager-2.1.7-portable.exe', size: 190 }
+    ];
+    assert.strictEqual(pickAsset(ascii).name, 'bili-relation-manager-2.1.7-portable.exe', 'ASCII portable 标记也要认');
+    assert.strictEqual(pickAsset([{ name: 'only-one.exe', size: 5 }]).name, 'only-one.exe', '唯一 exe 时直接用它');
   });
 
   console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
