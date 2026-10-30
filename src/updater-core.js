@@ -11,10 +11,18 @@ function parseVer(v) {
   return { major: +m[1], minor: +m[2], patch: +m[3] };
 }
 
-/** 按数值比较（2.10.0 > 2.9.9）；任一无法解析时返回 0（视为相同，不误升级） */
+/**
+ * 按数值比较（2.10.0 > 2.9.9）；任一无法解析时返回 0（视为相同，不误升级）。
+ * 参数既可以是字符串（'2.1.6'），也可以是 parseVer 的结果（{major,minor,patch}）——
+ * 早先只认字符串，调用方传了已解析的对象，String({}) 解析失败 → 返回 0 →
+ * 「当前版本 >= 最新版」恒成立 → 永远提示「已是最新版本」，热更新一次都没弹过。
+ */
 function compareVer(a, b) {
-  const x = parseVer(a);
-  const y = parseVer(b);
+  const norm = (v) => (v && typeof v === 'object' && v.major != null && v.minor != null && v.patch != null
+    ? v
+    : parseVer(v));
+  const x = norm(a);
+  const y = norm(b);
   if (!x || !y) return 0;
   return (x.major - y.major) || (x.minor - y.minor) || (x.patch - y.patch);
 }

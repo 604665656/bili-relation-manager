@@ -105,7 +105,8 @@ class Updater {
     if (!latest || !current) return { hasUpdate: false, error: '版本号解析失败（tag=' + json.tag_name + '）' };
     const currentTxt = core.fmt(current);
     const latestTxt = core.fmt(latest);
-    if (core.compareVer(current, latest) >= 0) {
+    // 用规整后的字符串比较（compareVer 也兼容对象，这里显式传字符串更直观）
+    if (core.compareVer(currentTxt, latestTxt) >= 0) {
       return { hasUpdate: false, version: latestTxt, current: currentTxt };
     }
     const asset = core.pickAsset(json.assets || []);

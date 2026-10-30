@@ -182,6 +182,10 @@ async function t(name, fn) {
     assert.ok(compareVer('2.10.0', '2.9.9') > 0, '必须按数值比较（2.10.0 > 2.9.9）');
     assert.ok(compareVer('3.0.0', '2.9.9') > 0, '主版本优先');
     assert.strictEqual(compareVer('x', '2.1.7'), 0, '无法解析时不误升级');
+    // 回归：线上检查更新传的是 parseVer 的结果（对象），曾经因只认字符串而恒判「已是最新」
+    assert.ok(compareVer(parseVer('2.1.6'), parseVer('2.1.9')) < 0, '传对象也必须能判出旧版本');
+    assert.ok(compareVer(parseVer('2.1.9'), parseVer('2.1.6')) > 0, '传对象也必须能判出新版本');
+    assert.strictEqual(compareVer(parseVer('2.1.9'), '2.1.9'), 0, '对象与字符串混用也要一致');
   });
   await t('安装包挑选：优先便携版单文件 EXE', () => {
     const assets = [

@@ -1,6 +1,6 @@
 {
   "name": "bili-relation-manager",
-  "version": "2.1.9",
+  "version": "2.1.10",
   "description": "B站多账号关注管理台 · 自动取关单向关注 / 自动回粉互粉",
   "main": "main.js",
   "author": "local",
