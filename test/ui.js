@@ -145,9 +145,20 @@ t('热更新弹窗与交互就位', () => {
 
 t('preload 暴露热更新 API', () => {
   const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
-  for (const m of ['updaterCheck', 'updaterApply', 'onUpdaterEvent', 'onMenuCheckUpdate']) {
+  for (const m of ['updaterCheck', 'updaterInfo', 'updaterApply', 'onUpdaterEvent', 'onMenuCheckUpdate']) {
     assert.ok(new RegExp(`\\b${m}:`).test(preload), 'preload 缺少 ' + m);
   }
+});
+
+t('顶部「可更新」常驻标记就位', () => {
+  assert.ok(/id="upd-badge"/.test(html), '缺少 #upd-badge');
+  assert.ok(/<button[^>]*id="upd-badge"[^>]*hidden/.test(html), '标记初始应隐藏');
+  assert.ok(/function setUpdateBadge\(/.test(js), '缺少 setUpdateBadge');
+  assert.ok(/\$\('#upd-badge'\)\.onclick/.test(js), '标记未绑定点击');
+  assert.ok(/setUpdateBadge\(ev\)/.test(js), 'available 事件未更新标记');
+  assert.ok(/ev\.type === 'none'/.test(js), '未处理「无更新」事件');
+  assert.ok(/window\.api\.updaterInfo\(\)/.test(js), '启动时未恢复已有提醒');
+  assert.ok(/\.upd-badge\s*\{[^}]*display:\s*none/.test(css), '标记默认 display 应为 none（显隐交给 JS）');
 });
 
 console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);

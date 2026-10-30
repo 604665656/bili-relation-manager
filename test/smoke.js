@@ -251,6 +251,24 @@ async function t(name, fn) {
     assert.ok(s.get().global.logKeepDays === 14, '默认保留 14 天');
   });
 
+  console.log('\n[6] 更新检查调度（常开软件也能发现新版）');
+  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  await t('启动首查 + 定时复查 + 回到前台补查都在', () => {
+    assert.ok(/UPDATE_FIRST_DELAY_MS/.test(mainSrc), '缺少启动首查延时配置');
+    assert.ok(/setInterval\([\s\S]{0,80}?runUpdateCheck/.test(mainSrc), '缺少定时复查');
+    assert.ok(/UPDATE_RECHECK_MS\s*=\s*2\s*\*\s*3600000/.test(mainSrc), '复查间隔应为 2 小时');
+    assert.ok(/on\('focus'/.test(mainSrc) && /UPDATE_FOCUS_MIN_MS/.test(mainSrc), '缺少窗口聚焦补查与节流');
+  });
+  await t('检查入口去重且手动检查必有反馈', () => {
+    assert.ok(/checkInFlight/.test(mainSrc), '缺少并发去重');
+    assert.ok(/type: 'none'/.test(mainSrc) && /manual/.test(mainSrc), '无更新/失败也应回事件给手动检查');
+    assert.ok(/ipcMain\.handle\('updater:info'/.test(mainSrc), '缺少 updater:info（界面重载后恢复提醒）');
+  });
+  await t('preload 暴露 updaterInfo', () => {
+    const pre = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+    assert.ok(/updaterInfo:\s*\(\)\s*=>\s*invoke\('updater:info'\)/.test(pre), 'preload 未暴露 updaterInfo');
+  });
+
   console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
   process.exit(fail ? 1 : 0);
 })();

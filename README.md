@@ -41,6 +41,11 @@
 19. **已注销 / 隐私限制黑名单** — 关注失败的「账号已注销」「隐私设置不允许关注」自动记入跨账号共享名录，之后直接跳过（实测占全部错误 31%）
 20. **日志按天落盘** — 完整日志写到 `数据目录/logs/YYYY-MM-DD.log`（默认保留 14 天，菜单「文件 → 打开日志目录」直达），界面只留最近 300 条；日志变少后 data.json 也显著变小
 
+**持续发现新版（v2.1.9）**
+21. **定时复查 + 回到前台补查** — 启动 6 秒首查之外，每 2 小时自动复查一次；窗口从后台切回且距上次检查超过 30 分钟时补查一次。此前只在启动时查一次，软件常开几天就永远发现不了新版
+22. **顶部「可更新 vX」常驻标记** — 发现新版后标题旁出现粉色药丸，点一下就能回到更新弹窗；即使先点了「稍后再说」或在下载前关掉弹窗，也不会再错过
+23. **手动检查必有反馈** — 菜单「帮助 → 检查更新…」无论有没有新版都会给出明确结果（已是最新 / 失败原因），不会点了没反应
+
 ## 对比参考的浏览器脚本方案
 
 | | 浏览器 Console 脚本 | 本工具 |
@@ -54,10 +59,10 @@
 
 ## 安装使用
 
-> 当前产物在 **`dist/`**（v2.1.8）
+> 当前产物在 **`dist/`**（v2.1.9）
 
-方式一：安装版 —— `dist\B站关注管理台-2.1.8.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
-方式二：便携版 —— `dist\B站关注管理台-2.1.8-便携版.exe`（单文件约 96MB，双击即用，免安装）
+方式一：安装版 —— `dist\B站关注管理台-2.1.9.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
+方式二：便携版 —— `dist\B站关注管理台-2.1.9-便携版.exe`（单文件约 96MB，双击即用，免安装）
 方式三：免打包 —— `dist\win-unpacked\B站关注管理台.exe`（解压版，便于排查）
 
 已验证：打包后的 EXE 执行 `--selftest` 通过，结果写入 `%APPDATA%\bili-relation-manager\selftest.txt`。
@@ -112,7 +117,7 @@ bili-relation-manager/
 ```bash
 npm install
 npm start          # 开发模式运行
-npm test           # 全套测试：smoke 24 + engine 57 + ui 13 = 94 项
+npm test           # 全套测试：smoke 27 + engine 57 + ui 14 = 98 项
 node test/engine.js  # 仅功能离线测试（并发/上限/白名单/演练/停止/搜索找目标/回关率/自动循环/异常重启/看门狗/满关自救/源负缓存/轮转/节流/熔断，57 项）
 npm run build      # 打包 Windows x64，产出 nsis 安装包 + portable 单文件
 node tools/verify-asar.js   # 打包后校验 asar 里文件齐全 + 版本标记都在（PASS/FAIL）
@@ -127,7 +132,7 @@ node tools/verify-asar.js   # 打包后校验 asar 里文件齐全 + 版本标�
 2. 打 tag 并推送，创建 Release 后上传两个 EXE 作为资产：
 
 ```bash
-git tag v2.1.8 && git push origin v2.1.8
+git tag v2.1.9 && git push origin v2.1.9
 # 创建 Release（notes 自拟），然后用发布脚本上传资产：
 GH_TOKEN=<github token> node tools/publish-release.js
 ```

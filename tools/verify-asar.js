@@ -20,7 +20,6 @@ const need = [
 ];
 
 const marks = [
-  '源健康度·日志落盘',
   'upHealth',
   'hiddenUntil',
   'deadUsers',
@@ -28,11 +27,19 @@ const marks = [
   '冷却中',
   'capGuard',
   'updater:apply',
+  'updater:info',
+  'setUpdateBadge',
   'logKeepDays',
   'pruneLogFiles',
   '已注销 / 不可关注',
-  '"version": "2.1.8"',
 ];
+
+// 版本号与构建标记从源码现取，避免每次发版都要改这个脚本
+const VERSION = require('../package.json').version;
+const mainSrc = require('fs').readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+const BUILD = (mainSrc.match(/const BUILD_TAG = '([^']+)'/) || [])[1] || '';
+marks.push(`"version": "${VERSION}"`);
+if (BUILD) marks.push(BUILD);
 
 let ok = true;
 console.log('asar:', file);

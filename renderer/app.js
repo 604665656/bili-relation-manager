@@ -23,8 +23,15 @@ async function boot() {
   if (window.api.onMenuOpenSupport) window.api.onMenuOpenSupport(() => openSupport());
   // 菜单「帮助 → 检查更新…」
   if (window.api.onMenuCheckUpdate) window.api.onMenuCheckUpdate(() => doCheckUpdate());
-  // 热更新事件（启动静默检查 / 下载进度 / 出错）
+  // 热更新事件（启动静默检查 / 定时复查 / 下载进度 / 出错）
   if (window.api.onUpdaterEvent) window.api.onUpdaterEvent(onUpdaterEvent);
+  // 主进程可能已经查到过新版（比如弹窗被关掉了），启动后补一次常驻提醒
+  if (window.api.updaterInfo) {
+    try {
+      const info = await window.api.updaterInfo();
+      if (info && info.version) setUpdateBadge(info);
+    } catch (e) { /* ignore */ }
+  }
 }
 
 async function reloadState() {
@@ -75,6 +82,11 @@ function wireEvents() {
     closeUpdate();
   };
   $('#modal-update').onclick = (e) => { if (e.target === $('#modal-update')) closeUpdate(); };
+  // 顶部「可更新 vX」常驻提示：点开就回到更新弹窗（没信息则现场查一次）
+  $('#upd-badge').onclick = () => {
+    if (UPD.info && UPD.info.version) openUpdate(UPD.info);
+    else doCheckUpdate();
+  };
   // Esc 关闭弹窗 / 收起登录提示条
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
@@ -232,6 +244,23 @@ function openSupport() { showEl($('#modal-support')); }
 function closeSupport() { hideEl($('#modal-support')); }
 
 /* ─────────── 热更新 ─────────── */
+
+/** 顶部「可更新 vX」常驻标记：关掉弹窗也不会错过（传 null 隐藏） */
+function setUpdateBadge(info) {
+  const el = $('#upd-badge');
+  if (!el) return;
+  if (info && info.version) {
+    UPD.info = info;
+    el.textContent = '可更新 v' + info.version;
+    el.title = `发现新版本 v${info.version}（当前 v${info.current || '?'}），点击查看并更新`;
+    showEl(el, 'inline-flex');
+  } else {
+    UPD.info = null;
+    el.textContent = '可更新 v?';
+    hideEl(el);
+  }
+}
+
 function openUpdate(info) {
   UPD.info = info || null;
   $('#upd-cur').textContent = 'v' + ((info && info.current) || '?');
@@ -255,9 +284,11 @@ async function doCheckUpdate() {
   try { r = await window.api.updaterCheck(); }
   catch (e) { r = { hasUpdate: false, error: String(e && e.message || e) }; }
   if (r && r.hasUpdate) {
+    setUpdateBadge(r);
     openUpdate(r);
     setStatus(`发现新版本 v${r.version}`);
   } else {
+    setUpdateBadge(null);
     const msg = (r && r.error) ? r.error : `已是最新版本 v${(r && r.version) || ''}`;
     setStatus(msg);
     toast(msg);
@@ -280,11 +311,20 @@ async function doApplyUpdate() {
 function onUpdaterEvent(ev) {
   if (!ev || !ev.type) return;
   if (ev.type === 'available') {
+    setUpdateBadge(ev);   // 不管弹不弹窗，顶部标记都要在
     // 同一版本被「稍后再说」跳过就不再自动弹
     let skipped = null;
     try { skipped = localStorage.getItem('brm-skip-ver'); } catch (e) { /* ignore */ }
-    if (skipped && skipped === ev.version) { setStatus(`有新版本 v${ev.version}（已设置跳过提醒）`); return; }
+    if (skipped && skipped === ev.version) { setStatus(`有新版本 v${ev.version}（已设置跳过提醒，可点顶部「可更新」）`); return; }
     openUpdate(ev);
+  } else if (ev.type === 'none') {
+    setUpdateBadge(null);
+    // 自动检查失败/无更新就静默；用户手动点「检查更新」必须给反馈
+    if (ev.manual) {
+      const msg = ev.error || `已是最新版本 v${ev.version || ''}`;
+      setStatus(msg);
+      toast(msg);
+    }
   } else if (ev.type === 'progress') {
     const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
     $('#upd-pct').textContent = ev.pct != null ? `${ev.pct}%` : `已下载 ${mb(ev.received || 0)}`;

@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('api', {
   exportCsv: () => invoke('app:exportCsv'),
 
   updaterCheck: () => invoke('updater:check'),
+  updaterInfo: () => invoke('updater:info'),
   updaterApply: () => invoke('updater:apply'),
 
   onLog: (cb) => subscribe('bus:log', cb),

@@ -11,8 +11,16 @@ const { Updater } = require('./src/updater');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-30 20:30 源健康度·日志落盘';
+const BUILD_TAG = '2026-10-30 21:15 热更新自动复查';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
+
+/** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
+const UPDATE_FIRST_DELAY_MS = 6000;        // 启动后 6 秒静默首查
+const UPDATE_RECHECK_MS = 2 * 3600000;     // 每 2 小时自动复查一次
+const UPDATE_FOCUS_MIN_MS = 30 * 60000;    // 窗口重获焦点时，距上次检查超过 30 分钟才补查
+let updateInfo = null;                     // 最近一次「发现有新版」的信息（供界面常驻提醒）
+let lastCheckAt = 0;
+let checkInFlight = null;
 
 app.disableHardwareAcceleration();
 app.setAppUserModelId && app.setAppUserModelId('com.local.bili.relation.manager');
@@ -418,26 +426,50 @@ function registerIPC() {
   ipcMain.handle('app:exportCsv', safe('app:exportCsv', async () => exportCsvNow()));
 
   // ── 热更新 ──
-  const emitUpdater = (ev) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try { mainWindow.webContents.send('updater:event', ev); } catch (e) { /* ignore */ }
-    }
-  };
-  ipcMain.handle('updater:check', safe('updater:check', async () => {
-    if (!updater) return { hasUpdate: false, error: '更新模块未就绪' };
-    const r = await updater.check();
-    if (r.hasUpdate) {
-      emitUpdater({ type: 'available', version: r.version, current: r.current, notes: r.notes, asset: r.asset, pageUrl: r.pageUrl });
-      sendLog('ok', `发现新版本 v${r.version}（当前 v${r.current}），可在弹窗中一键更新`);
-    } else if (r.error) {
-      sendLog('warn', r.error);
-    }
-    return r;
-  }));
+  ipcMain.handle('updater:check', safe('updater:check', () => runUpdateCheck({ manual: true })));
+  ipcMain.handle('updater:info', safe('updater:info', () => updateInfo));
   ipcMain.handle('updater:apply', safe('updater:apply', async () => {
     if (!updater) return { ok: false, error: '更新模块未就绪' };
     return await updater.downloadAndApply();
   }));
+}
+
+/* ══════════════ 热更新：检查调度 ══════════════ */
+
+/** 把更新事件转发给界面（窗口没起来时静默丢弃） */
+function sendUpdater(ev) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('updater:event', ev); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 统一的检查入口：手动与自动共用，并做并发去重。
+ * 有新版本 → 记入 updateInfo + 事件通知界面（界面弹窗并显示常驻「可更新」标记）；
+ * 已最新 / 失败 → manual 时也回一次事件，让用户手动点「检查更新」总能拿到反馈。
+ */
+function runUpdateCheck(opts = {}) {
+  if (checkInFlight) return checkInFlight;
+  const manual = !!opts.manual;
+  checkInFlight = (async () => {
+    if (!updater) return { hasUpdate: false, error: '更新模块未就绪' };
+    lastCheckAt = Date.now();
+    let r;
+    try { r = await updater.check(); }
+    catch (e) { r = { hasUpdate: false, error: String((e && e.message) || e) }; }
+    if (r && r.hasUpdate) {
+      const fresh = !updateInfo || updateInfo.version !== r.version;
+      updateInfo = { version: r.version, current: r.current, notes: r.notes, asset: r.asset, pageUrl: r.pageUrl };
+      sendUpdater(Object.assign({ type: 'available' }, updateInfo));
+      if (fresh) sendLog('ok', `发现新版本 v${r.version}（当前 v${r.current}），可在弹窗或顶部「可更新」处一键更新`);
+    } else {
+      updateInfo = null;
+      sendUpdater({ type: 'none', manual, version: r && r.version, current: r && r.current, error: r && r.error });
+      if (r && r.error) sendLog('warn', r.error);
+    }
+    return r;
+  })().finally(() => { checkInFlight = null; });
+  return checkInFlight;
 }
 
 /** 导出操作记录（IPC 与菜单共用） */
@@ -600,12 +632,8 @@ app.whenReady().then(async () => {
   hookRecords();
   buildAppMenu();   // 中文应用菜单（文件/编辑/视图/窗口/帮助）
 
-  // 热更新：事件统一转发给渲染进程（available/progress/status/error）
-  updater = new Updater({ onEvent: (ev) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try { mainWindow.webContents.send('updater:event', ev); } catch (e) { /* ignore */ }
-    }
-  }});
+  // 热更新：事件统一转发给渲染进程（available/progress/status/error/none）
+  updater = new Updater({ onEvent: (ev) => sendUpdater(ev) });
 
   // 自检模式：不起界面，验证主进程各模块可正常装载（打包后可用 EXE --selftest 验证完整性）
   if (process.argv.includes('--selftest')) {
@@ -616,6 +644,8 @@ app.whenReady().then(async () => {
     check('bilibili', () => { new BiliClient('SESSDATA=a; bili_jct=b; DedeUserID=1'); });
     check('updater', () => {
       if (typeof Updater !== 'function') throw new Error('Updater 未导出');
+      if (typeof runUpdateCheck !== 'function') throw new Error('更新检查调度未定义');
+      if (!(UPDATE_RECHECK_MS > 0)) throw new Error('复查间隔未配置');
       const core = require('./src/updater-core');
       if (core.compareVer('2.1.6', '2.1.7') >= 0) throw new Error('版本比较逻辑异常');
       if (!core.pickAsset([{ name: 'x-便携版.exe', size: 1 }])) throw new Error('资产挑选逻辑异常');
@@ -637,23 +667,18 @@ app.whenReady().then(async () => {
 
   createMainWindow();
 
-  // 热更新：启动 6 秒后静默检查一次 GitHub Releases（不打绕用户），
-  // 发现新版时由渲染进程弹窗提示，用户点「立即更新并重启」才会下载替换。
-  setTimeout(() => {
-    updater.check().then((r) => {
-      if (r.hasUpdate) {
-        sendLog('ok', `发现新版本 v${r.version}（当前 v${r.current}），按弹窗提示可一键热更新`);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          try {
-            mainWindow.webContents.send('updater:event', {
-              type: 'available', version: r.version, current: r.current,
-              notes: r.notes, asset: r.asset, pageUrl: r.pageUrl
-            });
-          } catch (e) { /* ignore */ }
-        }
-      }
-    }).catch(() => { /* 检查失败静默忽略，不打扰用户 */ });
-  }, 6000);
+  // 热更新：启动 6 秒后静默首查，之后每 2 小时复查，窗口重获焦点时按 30 分钟节流补查。
+  // 之前只在启动时查一次 —— 软件常开几天就永远发现不了新版，这里补上持续发现能力。
+  // 发现新版只发事件：界面弹窗 + 顶部常驻「可更新 vX」标记；用户点「立即更新并重启」才下载替换。
+  lastCheckAt = Date.now();
+  setTimeout(() => { runUpdateCheck(); }, UPDATE_FIRST_DELAY_MS);
+  const recheckTimer = setInterval(() => { runUpdateCheck(); }, UPDATE_RECHECK_MS);
+  if (recheckTimer.unref) recheckTimer.unref();
+  if (mainWindow) {
+    mainWindow.on('focus', () => {
+      if (Date.now() - lastCheckAt >= UPDATE_FOCUS_MIN_MS) runUpdateCheck();
+    });
+  }
 
   // 启动时自动恢复：若用户在全局设置中开启「启动时自动恢复任务」，
   // 则按上次配置自动启动「有任务且未禁用」的账号——软件第二天 / 崩溃重启后无需手动点「开始」。
