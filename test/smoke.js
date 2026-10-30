@@ -204,6 +204,53 @@ async function t(name, fn) {
     assert.strictEqual(pickAsset([{ name: 'only-one.exe', size: 5 }]).name, 'only-one.exe', '唯一 exe 时直接用它');
   });
 
+  console.log('\n[5] 日志落盘 / 死号名单 / UP 健康度');
+  const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), 'brm-log-'));
+  const dayStr = (d) => {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  await t('日志按天写文件，界面只留 300 条', () => {
+    const s = new Store(dir5); s.load();
+    for (let i = 0; i < 350; i++) s.addLog({ level: 'info', msg: 'm' + i });
+    assert.strictEqual(s.get().logs.length, 300, '内存日志应裁剪到 300 条');
+    const f = path.join(dir5, 'logs', dayStr(new Date()) + '.log');
+    assert.ok(fs.existsSync(f), '应生成按天日志文件');
+    const txt = fs.readFileSync(f, 'utf8');
+    assert.ok(/\[info\] m349/.test(txt), '日志文件应包含最新一条');
+    assert.ok(/m0/.test(txt), '日志文件不应被裁剪');
+  });
+  await t('死号名单跨账号共享且去重', () => {
+    const s = new Store(dir5); s.load();
+    s.addDeadUser('111', '账号已注销');
+    s.addDeadUser('111', '账号已注销');
+    assert.ok(s.isDeadUser(111));
+    assert.ok(!s.isDeadUser(222));
+    assert.strictEqual(s.get().global.deadUsers.length, 1, '应去重');
+    const s2 = new Store(dir5); s2.load();
+    assert.ok(s2.isDeadUser('111'), '应持久化');
+  });
+  await t('UP 健康度读写 + 过期清理', () => {
+    const s = new Store(dir5); s.load();
+    const until = Date.now() + 86400000;
+    s.setUpHealth('9001', { hiddenUntil: until, fails: 2, kind: 'hidden' });
+    const h = s.upHealthOf('9001');
+    assert.strictEqual(h.fails, 2);
+    assert.strictEqual(h.hiddenUntil, until);
+    s.get().global.upHealth['old'] = { updatedAt: Date.now() - 40 * 86400000 };
+    assert.strictEqual(s.pruneUpHealth(30), 1, '超过 30 天的记录应清理');
+    assert.ok(s.upHealthOf('9001'), '新记录应保留');
+  });
+  await t('超过保留天数的日志文件在启动时删除', () => {
+    const d = path.join(dir5, 'logs');
+    fs.mkdirSync(d, { recursive: true });
+    const old = path.join(d, '2000-01-01.log');
+    fs.writeFileSync(old, 'x');
+    const s = new Store(dir5); s.load();
+    assert.ok(!fs.existsSync(old), '过期日志应被清理');
+    assert.ok(s.get().global.logKeepDays === 14, '默认保留 14 天');
+  });
+
   console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
   process.exit(fail ? 1 : 0);
 })();

@@ -86,14 +86,20 @@ function normalizeCfg(cfg) {
 const DEFAULT_GLOBAL = {
   whiteList: [],           // 全局白名单：永不操作
   neverFollow: [],         // 不再关注名单：取关成功后自动写入，后续模式一律跳过
+  deadUsers: [],           // 不可关注用户（已注销 / 隐私限制），跨账号共享，避免重复尝试
+  upHealth: {},            // 目标 UP 健康度（跨账号共享）：{ [uid]: { hiddenUntil, nextTryAt, fails, kind, lastScanAt, lastBy } }
   rateThreshold: 0.15,     // 回关率下限（低于则停止关注该来源的粉丝）
   rateMinSample: 20,       // 达到该核验样本量才做回关率判断
   rateVerifyGapHours: 24,  // 关注后至少多久才核验对方是否回关
   pageGap: 1200,           // 翻页间隔(ms)
   statIntervalMin: 5,      // 关注/粉丝数实时刷新间隔(分钟)
   autoStartOnLaunch: false, // 应用启动时，自动恢复「有任务且未禁用」的账号（需用户主动开启）
-  followCap: 5000          // 关注上限保护：关注数达到该值就跳过「自动关注」，防止被 B 站拒绝（普通账号 5000，大会员可调高；0 = 关闭）
+  followCap: 5000,         // 关注上限保护：关注数达到该值就跳过「自动关注」，防止被 B 站拒绝（普通账号 5000，大会员可调高；0 = 关闭）
+  logKeepDays: 14          // 每日日志文件保留天数（logs/YYYY-MM-DD.log）
 };
+
+/** 界面日志保留条数（完整历史在 logs/ 目录的每日文件里） */
+const UI_LOG_CAP = 300;
 
 class Store {
   constructor(dir) {
@@ -116,7 +122,17 @@ class Store {
       raw || {}
     );
     this.data.global = Object.assign({}, DEFAULT_GLOBAL, this.data.global || {});
+    // 默认值里的数组/对象是共享引用，必须克隆成本实例私有，避免多个 Store 互相污染
+    const g = this.data.global;
+    if (!Array.isArray(g.whiteList)) g.whiteList = [];
+    if (!Array.isArray(g.neverFollow)) g.neverFollow = [];
+    if (!Array.isArray(g.deadUsers)) g.deadUsers = [];
+    if (!g.upHealth || typeof g.upHealth !== 'object' || Array.isArray(g.upHealth)) g.upHealth = {};
+    if (!Array.isArray(this.data.logs)) this.data.logs = [];
     this.data.accounts = (this.data.accounts || []).map((a) => this._normalize(a));
+    this._deadSet = null;   // 懒加载索引
+    this.pruneLogFiles();
+    this.pruneUpHealth();
     return this.data;
   }
 
@@ -134,7 +150,9 @@ class Store {
         a.followStats || {}
       ),
       // 每日操作计数
-      daily: Object.assign({ date: '', ops: 0 }, a.daily || {})
+      daily: Object.assign({ date: '', ops: 0 }, a.daily || {}),
+      // 「指定 UP」轮转游标：记住上轮扫到列表第几个，下轮从这里继续（避免只扫头部）
+      upCursor: Number(a.upCursor) || 0
     };
   }
 
@@ -238,6 +256,99 @@ class Store {
     return [];
   }
 
+  /* ══════ 不可关注用户（已注销 / 隐私限制），跨账号共享 ══════ */
+  isDeadUser(uid) {
+    const key = String(uid);
+    if (!this._deadSet) this._deadSet = new Set((this.get().global.deadUsers || []).map(String));
+    return this._deadSet.has(key);
+  }
+  addDeadUser(uid, reason) {
+    const g = this.get().global;
+    const key = String(uid);
+    if (!this._deadSet) this._deadSet = new Set((g.deadUsers || []).map(String));
+    if (this._deadSet.has(key)) return g.deadUsers;
+    this._deadSet.add(key);
+    g.deadUsers = (g.deadUsers || []).concat([key]).slice(-5000);
+    this.flush();
+    return g.deadUsers;
+  }
+  clearDeadUsers() {
+    this.get().global.deadUsers = [];
+    this._deadSet = new Set();
+    this.flush();
+    return [];
+  }
+
+  /* ══════ 目标 UP 健康度（跨账号共享的负缓存，避免反复打隐藏/风控源） ══════ */
+  upHealthOf(uid) {
+    const h = this.get().global.upHealth || {};
+    return h[String(uid)] || null;
+  }
+  setUpHealth(uid, patch) {
+    const g = this.get().global;
+    if (!g.upHealth || typeof g.upHealth !== 'object') g.upHealth = {};
+    const key = String(uid);
+    const prev = g.upHealth[key] || {};
+    g.upHealth[key] = Object.assign({}, prev, patch || {}, { updatedAt: Date.now() });
+    // 不在这里 flush：每轮会写很多次，交给主进程 3s 定时落盘，避免频繁重写整个 data.json
+    return g.upHealth[key];
+  }
+  /** 清理 30 天没再碰过的 UP 健康度记录，防无限膨胀 */
+  pruneUpHealth(days = 30) {
+    const g = this.get().global;
+    const h = g && g.upHealth;
+    if (!h || typeof h !== 'object') return 0;
+    const cutoff = Date.now() - days * 86400000;
+    let n = 0;
+    for (const k of Object.keys(h)) {
+      const t = Number((h[k] || {}).updatedAt) || 0;
+      if (t && t < cutoff) { delete h[k]; n++; }
+    }
+    return n;
+  }
+  /** 保存某账号的「指定 UP」轮转游标 */
+  setUpCursor(id, n) {
+    const a = this.getAccount(id);
+    if (!a) return 0;
+    a.upCursor = Math.max(0, Number(n) || 0);
+    this.flush();
+    return a.upCursor;
+  }
+
+  /* ══════ 日志：内存留最近 N 条给界面，完整历史按天写文件 ══════ */
+  _logFilePath(day) {
+    return path.join(this.dir, 'logs', day + '.log');
+  }
+  _appendLogFile(row) {
+    const ts = new Date(row.ts || Date.now());
+    const p2 = (n) => String(n).padStart(2, '0');
+    const day = `${ts.getFullYear()}-${p2(ts.getMonth() + 1)}-${p2(ts.getDate())}`;
+    const time = `${p2(ts.getHours())}:${p2(ts.getMinutes())}:${p2(ts.getSeconds())}`;
+    const acc = row.accountId ? ((this.getAccount(row.accountId) || {}).uname || '') : '';
+    const line = `${day} ${time} [${row.level}]${acc ? ' [' + acc + ']' : ''} ${row.msg}\n`;
+    try {
+      const f = this._logFilePath(day);
+      if (!this._logDirReady) { fs.mkdirSync(path.dirname(f), { recursive: true }); this._logDirReady = true; }
+      fs.appendFileSync(f, line, 'utf8');
+    } catch (e) { /* 日志文件写失败不影响主流程 */ }
+  }
+  /** 清理超过 logKeepDays 天的日志文件 */
+  pruneLogFiles() {
+    const keep = Number((this.get().global || {}).logKeepDays) || 14;
+    const cutoff = Date.now() - keep * 86400000;
+    let n = 0;
+    try {
+      const dir = path.join(this.dir, 'logs');
+      for (const f of fs.readdirSync(dir)) {
+        const m = f.match(/^(\d{4})-(\d{2})-(\d{2})\.log$/);
+        if (!m) continue;
+        const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T00:00:00`);
+        if (t && t < cutoff) { try { fs.unlinkSync(path.join(dir, f)); n++; } catch (e) { /* ignore */ } }
+      }
+    } catch (e) { /* 目录不存在 */ }
+    return n;
+  }
+
   /* ══════ 账号级统计 ══════ */
   /** 通用字段补丁（live / followStats / daily） */
   patchAccount(id, patch) {
@@ -295,8 +406,11 @@ class Store {
   /** 高频写入，不落盘；由主进程定时 flush，避免每条日志重写整个文件 */
   addLog(row) {
     const d = this.get();
-    d.logs.push(Object.assign({ ts: Date.now() }, row));
-    if (d.logs.length > 1000) d.logs.splice(0, d.logs.length - 1000);
+    const entry = Object.assign({ ts: Date.now() }, row);
+    d.logs.push(entry);
+    // 界面只留最近 N 条；完整历史写 logs/YYYY-MM-DD.log（保留 logKeepDays 天）
+    if (d.logs.length > UI_LOG_CAP) d.logs.splice(0, d.logs.length - UI_LOG_CAP);
+    this._appendLogFile(entry);
     return d.logs;
   }
 }

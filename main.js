@@ -11,7 +11,7 @@ const { Updater } = require('./src/updater');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-25 12:00 满关自救 + 应用内热更新';
+const BUILD_TAG = '2026-10-30 20:30 源健康度·日志落盘';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 app.disableHardwareAcceleration();
@@ -477,6 +477,7 @@ function buildAppMenu() {
         { type: 'separator' },
         { label: '导出操作记录（CSV）…', click: () => exportCsvNow() },
         { label: '打开数据目录', click: () => { try { shell.openPath(store.dir); } catch (e) { /* ignore */ } } },
+        { label: '打开日志目录（按天存档）', click: () => { try { shell.openPath(path.join(store.dir, 'logs')); } catch (e) { /* ignore */ } } },
         { type: 'separator' },
         { label: '退出', role: 'quit' }
       ]

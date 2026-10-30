@@ -34,6 +34,13 @@
 14. **满关自救** — 账号配置新增开关：关注数达到「上限 − 预留名额」（默认距 5000 还剩 100）时，①「自动关注」暂停，不再撞上限被拒 ②「清理单向关注」忽略「关注满 N 天」门槛立即腾名额——满员账号每天都能清，不会一直卡在上限
 15. **应用内热更新** — 启动 6 秒后静默检查 GitHub Releases，发现新版自动弹窗（版本号 + 更新说明 + 下载进度）；点「立即更新并重启」即下载新版便携 EXE、退出时自动替换并重启。也可随时从菜单「帮助 → 检查更新…」手动触发；「稍后再说」的版本不再自动提醒
 
+**源健康度与可观测性（v2.1.8，基于 5 天实跑日志）**
+16. **目标 UP 轮转** — 每轮从上次停下的位置继续扫，几千个 UP 都能轮到（此前每轮只扫列表头部几个，尾部永远轮不到）
+17. **失败源负缓存** — 「对方隐藏粉丝列表」自动休 30 天；`-412` 封禁 / `-352` 风控源指数退避（30 分钟→24 小时），不再每轮空跑重试（实测此前 69% 的 UP 请求是失败的）
+18. **跨账号节流 + 全局熔断** — 同一 UP 被某账号扫过后 10 分钟内其他账号不再重复扫；任一账号撞到 `-352/-509` 触发全局暂停 15 分钟，避免 5 个账号连锁触发风控
+19. **已注销 / 隐私限制黑名单** — 关注失败的「账号已注销」「隐私设置不允许关注」自动记入跨账号共享名录，之后直接跳过（实测占全部错误 31%）
+20. **日志按天落盘** — 完整日志写到 `数据目录/logs/YYYY-MM-DD.log`（默认保留 14 天，菜单「文件 → 打开日志目录」直达），界面只留最近 300 条；日志变少后 data.json 也显著变小
+
 ## 对比参考的浏览器脚本方案
 
 | | 浏览器 Console 脚本 | 本工具 |
@@ -47,10 +54,10 @@
 
 ## 安装使用
 
-> 当前产物在 **`dist/`**（v2.1.7）
+> 当前产物在 **`dist/`**（v2.1.8）
 
-方式一：安装版 —— `dist\B站关注管理台-2.1.7.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
-方式二：便携版 —— `dist\B站关注管理台-2.1.7-便携版.exe`（单文件约 96MB，双击即用，免安装）
+方式一：安装版 —— `dist\B站关注管理台-2.1.8.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
+方式二：便携版 —— `dist\B站关注管理台-2.1.8-便携版.exe`（单文件约 96MB，双击即用，免安装）
 方式三：免打包 —— `dist\win-unpacked\B站关注管理台.exe`（解压版，便于排查）
 
 已验证：打包后的 EXE 执行 `--selftest` 通过，结果写入 `%APPDATA%\bili-relation-manager\selftest.txt`。
@@ -94,14 +101,21 @@ bili-relation-manager/
 └── dist/                打包产物
 ```
 
+## 日志在哪
+
+- **界面日志页**：最近 300 条，存在 `data.json`，重启不丢
+- **完整历史**：`%APPDATA%\bili-relation-manager\logs\YYYY-MM-DD.log`，按天一个文件，默认保留 14 天
+- 菜单「**文件 → 打开日志目录（按天存档）**」可直接打开
+
 ## 命令
 
 ```bash
 npm install
 npm start          # 开发模式运行
-npm test           # 全套测试：smoke 20 + engine 50 + ui 13 = 83 项
-node test/engine.js  # 仅功能离线测试（并发/上限/白名单/演练/停止/搜索找目标/回关率/自动循环/异常重启/看门狗/满关自救，50 项）
+npm test           # 全套测试：smoke 24 + engine 57 + ui 13 = 94 项
+node test/engine.js  # 仅功能离线测试（并发/上限/白名单/演练/停止/搜索找目标/回关率/自动循环/异常重启/看门狗/满关自救/源负缓存/轮转/节流/熔断，57 项）
 npm run build      # 打包 Windows x64，产出 nsis 安装包 + portable 单文件
+node tools/verify-asar.js   # 打包后校验 asar 里文件齐全 + 版本标记都在（PASS/FAIL）
 ```
 
 > 本机若设置了 `ELECTRON_RUN_AS_NODE`（部分 Electron 宿主终端会注入），手动调试需先清除：
@@ -113,10 +127,13 @@ npm run build      # 打包 Windows x64，产出 nsis 安装包 + portable 单�
 2. 打 tag 并推送，创建 Release 后上传两个 EXE 作为资产：
 
 ```bash
-git tag v2.1.7 && git push origin v2.1.7
+git tag v2.1.8 && git push origin v2.1.8
 # 创建 Release（notes 自拟），然后用发布脚本上传资产：
 GH_TOKEN=<github token> node tools/publish-release.js
 ```
+
+> 打包时若卡在下载（`Timeout awaiting 'request'`），先设国内镜像：
+> `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`，并确保 `LOCALAPPDATA` 有值（否则 electron-builder 缓存目录解析失败，每次都要重新下载工具链）。
 
 3. 用户端：启动 6 秒后自动检查，发现新版即弹窗；点「立即更新并重启」自动完成替换。也可菜单「帮助 → 检查更新…」手动触发
 

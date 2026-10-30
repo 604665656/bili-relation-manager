@@ -28,7 +28,10 @@ const FIX = {
   backResult: {},   // fid -> 是否回关（用于 didFollowBack）
   relationAttr: {}, // fid -> 单用户关系 attribute（模拟「已是我的粉丝 = 4」）
   throwNavN: 0,     // nav 连续抛异常的次数（模拟请求/风控异常）
-  stat: { following: 100, follower: 50 }
+  stat: { following: 100, follower: 50 },
+  fansOfFail: {},   // UP uid -> 错误码（22118 隐藏 / -412 封禁 / -352 风控）
+  fansOfCalls: {},  // UP uid -> 被请求次数（验证负缓存与节流）
+  modifyFail: {}    // fid -> { code, message, kind }（模拟关注失败，如账号已注销）
 };
 
 BiliClient.prototype.getWbiKeys = async function () { return { img: 'a', sub: 'b' }; };
@@ -50,9 +53,14 @@ BiliClient.prototype.followers = async function (pn, ps, vmid) {
   const list = FIX.followers[String(vmid)] || [];
   return { code: 0, data: { total: list.length, list } };
 };
-BiliClient.prototype.fansOf = async function (vmid) {
-  const list = FIX.fansOf[String(vmid)] || [];
-  return { code: 0, data: { total: list.length, list } };
+BiliClient.prototype.fansOf = async function (vmid, pn) {
+  const k = String(vmid);
+  FIX.fansOfCalls[k] = (FIX.fansOfCalls[k] || 0) + 1;
+  const code = FIX.fansOfFail[k];
+  if (code) return { code, message: code === 22118 ? 'user privacy' : ('err ' + code) };
+  const all = FIX.fansOf[k] || [];
+  const list = ((pn || 1) === 1) ? all : [];
+  return { code: 0, data: { total: all.length, list } };
 };
 BiliClient.prototype.searchUsers = async function (kw, pn) {
   if (FIX.searchFail > 0) { FIX.searchFail--; return { code: -412, message: 'request was banned', list: [], total: 0, pages: 0 }; }
@@ -70,6 +78,8 @@ BiliClient.prototype.relation = async function (fid) {
 let actions = [];
 BiliClient.prototype.modify = async function (fid, act) {
   actions.push({ uid: this.mid, fid, act });
+  const mf = FIX.modifyFail[String(fid)];
+  if (mf) return Object.assign({ ok: false }, mf);
   if (act === 1 && FIX.dupFids.includes(fid)) {
     return { ok: false, code: 22007, message: '重复操作', kind: 'skip' };
   }
@@ -772,6 +782,146 @@ async function t(name, fn) {
     });
   }
   FIX.stat = { following: 100, follower: 50 };
+
+  /* ══════ [20] 源负缓存：隐藏粉丝列表只请求一次 ══════ */
+  console.log('\n[20] 源负缓存');
+  actions = [];
+  FIX.fansOfCalls = {}; FIX.fansOfFail = {}; FIX.modifyFail = {};
+  const s20 = mkStore({});
+  FIX.fansOfFail['9001'] = 22118;   // 对方隐藏了粉丝列表
+  const a20 = mkAcc(s20, 2300, {
+    tasks: { unfollow: false, follow: true },
+    sources: { fans: false, search: false, ups: true },
+    targetUps: '9001', delayMin: 1000, delayMax: 1000, maxOps: 5, dryRun: false
+  });
+  {
+    const e20 = new Engine(s20);
+    e20.startAll([a20.id]);
+    await waitIdle(e20);
+    await t('隐藏粉丝列表：只请求一次并写入负缓存', () => {
+      assert.strictEqual(FIX.fansOfCalls['9001'], 1, '应只请求一次');
+      const h = s20.upHealthOf('9001');
+      assert.ok(h && h.hiddenUntil > Date.now(), '应记录 hiddenUntil（30 天后复检）');
+    });
+    const e20b = new Engine(s20);
+    e20b.startAll([a20.id]);
+    await waitIdle(e20b);
+    await t('下一轮不再重复请求隐藏源', () => {
+      assert.strictEqual(FIX.fansOfCalls['9001'], 1, '负缓存生效后不应再发请求');
+    });
+  }
+
+  /* ══════ [21] 目标 UP 轮转 ══════ */
+  console.log('\n[21] 目标 UP 轮转');
+  actions = [];
+  FIX.fansOfCalls = {}; FIX.fansOfFail = {};
+  const s21 = mkStore({});
+  FIX.fansOf['9011'] = [item(93101, 0)];
+  FIX.fansOf['9012'] = [item(93102, 0)];
+  FIX.fansOf['9013'] = [item(93103, 0)];
+  const a21 = mkAcc(s21, 2400, {
+    tasks: { unfollow: false, follow: true },
+    sources: { fans: false, search: false, ups: true },
+    targetUps: '9011 9012 9013', delayMin: 1000, delayMax: 1000, maxOps: 1, dryRun: false
+  });
+  {
+    for (let i = 0; i < 3; i++) {
+      const e = new Engine(s21);
+      e.startAll([a21.id]);
+      await waitIdle(e);
+    }
+    await t('每轮从上次停下的位置继续，三轮覆盖三个不同 UP', () => {
+      assert.strictEqual(FIX.fansOfCalls['9011'], 1, '第 1 轮应扫 9011');
+      assert.strictEqual(FIX.fansOfCalls['9012'], 1, '第 2 轮应扫 9012');
+      assert.strictEqual(FIX.fansOfCalls['9013'], 1, '第 3 轮应扫 9013');
+      assert.strictEqual(s21.getAccount(a21.id).upCursor, 0, '跑满一圈后游标应回到起点');
+    });
+  }
+
+  /* ══════ [22] 已注销账号黑名单 ══════ */
+  console.log('\n[22] 已注销账号黑名单');
+  actions = [];
+  FIX.fansOfCalls = {}; FIX.modifyFail = {}; FIX.fansOfFail = {};
+  const s22 = mkStore({});
+  FIX.fansOf['9020'] = [item(94101, 0)];
+  FIX.modifyFail['94101'] = { code: 22012, message: '账号已注销，无法完成操作', kind: 'skip' };
+  const a22 = mkAcc(s22, 2500, {
+    tasks: { unfollow: false, follow: true },
+    sources: { fans: false, search: false, ups: true },
+    targetUps: '9020', delayMin: 1000, delayMax: 1000, maxOps: 5, dryRun: false
+  });
+  {
+    const e22 = new Engine(s22);
+    e22.startAll([a22.id]);
+    await waitIdle(e22);
+    const before = actions.filter((x) => x.fid === 94101).length;
+    await t('已注销账号被记入「不可关注」名单', () => {
+      assert.ok(s22.isDeadUser(94101), '应写入死号名单');
+      assert.strictEqual(before, 1, '第一次应真的尝试过');
+    });
+    const e22b = new Engine(s22);
+    e22b.startAll([a22.id]);
+    await waitIdle(e22b);
+    await t('后续轮次直接跳过死号，不再发请求', () => {
+      assert.strictEqual(actions.filter((x) => x.fid === 94101).length, before, '不应再次尝试关注');
+    });
+  }
+
+  /* ══════ [23] 同一 UP 跨账号节流 ══════ */
+  console.log('\n[23] 同一 UP 跨账号节流');
+  actions = [];
+  FIX.fansOfCalls = {}; FIX.fansOfFail = {}; FIX.modifyFail = {};
+  const s23 = mkStore({});
+  FIX.fansOf['9030'] = [item(95101, 0)];
+  const aA = mkAcc(s23, 2600, {
+    tasks: { unfollow: false, follow: true }, sources: { fans: false, search: false, ups: true },
+    targetUps: '9030', delayMin: 1000, delayMax: 1000, maxOps: 1, dryRun: false
+  });
+  const aB = mkAcc(s23, 2700, {
+    tasks: { unfollow: false, follow: true }, sources: { fans: false, search: false, ups: true },
+    targetUps: '9030', delayMin: 1000, delayMax: 1000, maxOps: 1, dryRun: false
+  });
+  {
+    const e23 = new Engine(s23);
+    e23.startAll([aA.id]);
+    await waitIdle(e23);
+    e23.startAll([aB.id]);
+    await waitIdle(e23);
+    await t('A 扫过的 UP，B 在 10 分钟内不再重复扫', () => {
+      assert.strictEqual(FIX.fansOfCalls['9030'], 1, '同一 UP 只应被请求一次');
+    });
+  }
+
+  /* ══════ [24] 全局风控熔断 ══════ */
+  console.log('\n[24] 全局风控熔断');
+  actions = [];
+  FIX.fansOfCalls = {}; FIX.fansOfFail = {}; FIX.modifyFail = {};
+  const s24 = mkStore({});
+  FIX.fansOfFail['9040'] = -352;
+  FIX.fansOf['9041'] = [item(96101, 0)];
+  const aC = mkAcc(s24, 2800, {
+    tasks: { unfollow: false, follow: true }, sources: { fans: false, search: false, ups: true },
+    targetUps: '9040', delayMin: 1000, delayMax: 1000, maxOps: 5, dryRun: false
+  });
+  const aD = mkAcc(s24, 2900, {
+    tasks: { unfollow: false, follow: true }, sources: { fans: false, search: false, ups: true },
+    targetUps: '9041', delayMin: 1000, delayMax: 1000, maxOps: 5, dryRun: false
+  });
+  {
+    const e24 = new Engine(s24);
+    const logs24 = [];
+    e24.on('log', (l) => logs24.push(l.msg));
+    e24.startAll([aC.id]);
+    await waitIdle(e24);
+    e24.startAll([aD.id]);
+    await waitIdle(e24);
+    await t('撞到 -352 后全局熔断，其他账号本轮不再发请求', () => {
+      assert.ok(logs24.some((m) => /触发风控/.test(m)), '应有风控提示');
+      assert.ok(logs24.some((m) => /冷却中/.test(m)), '其他账号应跳过本轮');
+      assert.strictEqual(FIX.fansOfCalls['9041'], undefined, '熔断期间不应请求新 UP');
+    });
+  }
+  FIX.fansOfFail = {}; FIX.modifyFail = {};
 
   console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
   process.exit(fail ? 1 : 0);

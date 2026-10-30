@@ -7,6 +7,14 @@ const MUTUAL = 4;   // attribute 位：TA关注了我（回关）
 const FOLLOWED = 2; // attribute 位：我关注了TA
 const BLOCKED = 128;
 
+/* ── 源健康度策略（v2.1.8）──
+   实测：目标 UP 列表里大量「隐藏粉丝列表」与风控源，每轮重试导致 69% 请求打空。
+   这里给失败源加负缓存，并让各账号轮流扫不同 UP，避免 5 个账号同时打同一个源。 */
+const UP_THROTTLE_MS = 10 * 60000;        // 同一 UP 被其他账号扫过后，10 分钟内不再重复扫
+const UP_HIDDEN_TTL_MS = 30 * 86400000;   // 「对方隐藏粉丝列表」30 天后再复检
+const BREAKER_MS = 15 * 60000;            // 撞到 -352/-509 后全局暂停 15 分钟
+const SOURCE_WARN_EVERY_MS = 6 * 3600000; // 同一停用来源的提示 6 小时播一次
+
 const MODE_NAME = {
   unfollow: '清理单向关注',
   followback: '回粉粉丝',
@@ -65,6 +73,60 @@ class Engine extends EventEmitter {
     this.store = store;
     /** @type {Map<string, {state:string, cancel:boolean, stats:object}>} */
     this.runners = new Map();
+    /** 全局风控熔断：任一账号撞到 -352/-509 后，所有账号暂停到此时刻，避免连锁触发 */
+    this.cooldownUntil = 0;
+    /** 降噪：同一来源的「已停止」提示 6 小时内只播一次 */
+    this._warnAt = new Map();
+  }
+
+  /* ══════════ 源健康度：负缓存 + 跨账号节流 ══════════ */
+  /** 当前不适合扫这个 UP 的原因；null 表示可以扫 */
+  _upBlockedReason(upId, accountId) {
+    const h = this.store.upHealthOf(upId);
+    if (!h) return null;
+    const now = Date.now();
+    if (h.hiddenUntil && h.hiddenUntil > now) {
+      const days = Math.ceil((h.hiddenUntil - now) / 86400000);
+      return `对方隐藏粉丝列表（${days} 天后复检）`;
+    }
+    if (h.nextTryAt && h.nextTryAt > now) {
+      return `多次失败退避中（${Math.ceil((h.nextTryAt - now) / 60000)} 分钟后重试）`;
+    }
+    if (h.lastScanAt && (now - h.lastScanAt) < UP_THROTTLE_MS && String(h.lastBy) !== String(accountId)) {
+      return `刚被其他账号扫描（${Math.ceil((UP_THROTTLE_MS - (now - h.lastScanAt)) / 60000)} 分钟后可扫）`;
+    }
+    return null;
+  }
+
+  /** 记录一次扫描结果：ok 清零；hidden 长休 30 天；banned/risk 指数退避 */
+  _markUp(upId, kind, code, accountId) {
+    const prev = this.store.upHealthOf(upId) || {};
+    const now = Date.now();
+    if (kind === 'ok') {
+      this.store.setUpHealth(upId, { fails: 0, nextTryAt: 0, hiddenUntil: 0, kind: 'ok', lastCode: 0, lastAt: now, lastBy: accountId });
+      return;
+    }
+    const fails = (Number(prev.fails) || 0) + 1;
+    const patch = { fails, kind, lastCode: code || 0, lastAt: now, lastBy: accountId };
+    if (kind === 'hidden') {
+      patch.hiddenUntil = now + UP_HIDDEN_TTL_MS;
+      patch.nextTryAt = 0;
+    } else if (kind === 'banned') {
+      patch.nextTryAt = now + Math.min(30 * 60000 * Math.pow(2, fails - 1), 24 * 3600000);
+    } else if (kind === 'risk') {
+      patch.nextTryAt = now + Math.min(2 * 3600000 * Math.pow(2, fails - 1), 24 * 3600000);
+    } else {
+      patch.nextTryAt = now + 30 * 60000;
+    }
+    this.store.setUpHealth(upId, patch);
+  }
+
+  /** 触发全局风控熔断 */
+  _tripBreaker(accountId, code) {
+    const until = Date.now() + BREAKER_MS;
+    const isNew = until > (this.cooldownUntil || 0);
+    if (isNew) this.cooldownUntil = until;
+    this._log(accountId, 'warn', `触发风控（code=${code}），全局暂停 ${Math.round(BREAKER_MS / 60000)} 分钟：所有账号本轮停止请求，避免连锁触发`);
   }
 
   stateOf(id) {
@@ -285,6 +347,13 @@ class Engine extends EventEmitter {
   async _runRoundBody(acc, run, round) {
     const id = acc.id;
     const cfg = acc.cfg;
+
+    // 全局风控熔断：任一账号撞到 -352/-509 后，本轮所有账号直接跳过，等冷却结束
+    if (this.cooldownUntil && Date.now() < this.cooldownUntil) {
+      this._log(id, 'warn', `全局风控冷却中（剩余 ${Math.ceil((this.cooldownUntil - Date.now()) / 60000)} 分钟），本轮跳过不发请求`);
+      return;
+    }
+
     const client = new BiliClient(acc.cookie);
     if (!client.isLoggedCookie) throw new Error('Cookie 不完整，请重新登录');
 
@@ -376,6 +445,7 @@ class Engine extends EventEmitter {
     if (String(it.mid) === String(client.mid)) return '自己';
     if ((this.store.get().global.whiteList || []).map(String).includes(String(it.mid))) return '白名单';
     if (this.store.inNeverFollow(it.mid)) return '不再关注名单';
+    if (this.store.isDeadUser(it.mid)) return '已注销 / 不可关注';
     if (cfg.skipOfficial && it.official_verify && it.official_verify.type > 0 && it.official_verify.desc) return '认证账号';
     // 「特别关注」字段：新接口为 special，旧接口为 special_attention
     if (cfg.skipSpecial && (it.special === 1 || it.special_attention === 1)) return '特别关注';
@@ -682,9 +752,15 @@ class Engine extends EventEmitter {
     const by = (a && a.followStats && a.followStats.bySource) || {};
     const s = by[String(key)];
     if (!s || !s.stopped) return false;
-    const rate = s.sample ? Math.round((s.back / s.sample) * 100) : 0;
-    this._log(accId, 'warn',
-      `来源「${sourceLabel(key)}」回关率 ${rate}%（${s.back}/${s.sample}）低于阈值，已停止继续关注该来源`);
+    // 降噪：同一来源 6 小时内只播一次
+    const k = accId + '|' + String(key);
+    const last = this._warnAt.get(k) || 0;
+    if (Date.now() - last > SOURCE_WARN_EVERY_MS) {
+      this._warnAt.set(k, Date.now());
+      const rate = s.sample ? Math.round((s.back / s.sample) * 100) : 0;
+      this._log(accId, 'warn',
+        `来源「${sourceLabel(key)}」回关率 ${rate}%（${s.back}/${s.sample}）低于阈值，已停止继续关注该来源`);
+    }
     return true;
   }
 
@@ -699,27 +775,55 @@ class Engine extends EventEmitter {
     const ups = String(cfg.targetUps || '').split(/[\s,，;；]+/).filter(Boolean);
     if (!ups.length) { this._log(acc.id, 'warn', '未填写目标 UP 的 UID，跳过该阶段'); return; }
 
+    // ── 轮转：从上次停下的位置继续，让几千个 UP 都能轮到，而不是永远只扫头部几个 ──
+    const cur0 = this.store.getAccount(acc.id) || {};
+    const start = ups.length ? ((Number(cur0.upCursor) || 0) % ups.length) : 0;
+    const ordered = ups.slice(start).concat(ups.slice(0, start));
+    if (start > 0) this._log(acc.id, 'info', `目标 UP 共 ${ups.length} 个，本轮从第 ${start + 1} 个开始轮转`);
+
     let done = 0;
-    for (const up of ups) {
+    let advanced = 0;      // 本轮「走过」的 UP 数（扫描过或已判定不可用），用于推进游标
+    let blockedSkip = 0;   // 因负缓存/节流跳过的 UP 数
+
+    upLoop:
+    for (const up of ordered) {
       if (run.cancel || done >= cfg.maxOps) break;
 
       const stats = this.store.getAccount(acc.id).followStats || {};
       const src = (stats.bySource || {})[String(up)];
-      if (src && src.stopped && this._sourceBlocked(acc.id, up)) continue;
+      if (src && src.stopped && this._sourceBlocked(acc.id, up)) { advanced++; continue; }
 
+      // 负缓存：隐藏粉丝列表 / 失败退避 / 刚被其他账号扫过 → 不发请求
+      const blocked = this._upBlockedReason(up, acc.id);
+      if (blocked) { advanced++; blockedSkip++; continue; }
+
+      // 记录「谁、什么时候」扫过它 → 其他账号 10 分钟内不再重复扫同一个 UP
+      this.store.setUpHealth(up, { lastScanAt: Date.now(), lastBy: acc.id });
       this._log(acc.id, 'info', `开始扫描 UP ${up} 的粉丝列表（接口上限前 ${FANS_MAX_PAGES * 50} 条）`);
       let pn = 1, total = Infinity;
+      let failed = false;
 
       while (pn <= FANS_MAX_PAGES && !run.cancel && done < cfg.maxOps && (pn - 1) * 50 < total) {
-        if (!this._dailyOk(acc)) { this._log(acc.id, 'warn', '已达每日操作上限'); return; }
+        if (!this._dailyOk(acc)) { this._log(acc.id, 'warn', '已达每日操作上限'); break upLoop; }
         const j = await client.fansOf(Number(up), pn, 50);
         if (!j || j.code !== 0) {
-          const msg = (j && j.code === 22118) ? '对方隐藏了粉丝列表' : (j && j.message);
-          this._log(acc.id, 'error', `UP ${up} 粉丝列表拉取失败：${msg} (code=${j && j.code})`);
-          if (j && (j.code === -352 || j.code === -509 || j.code === -101)) return;
+          failed = true;
+          const code = j && j.code;
+          const msg = (code === 22118) ? '对方隐藏了粉丝列表' : (j && j.message);
+          this._log(acc.id, 'error', `UP ${up} 粉丝列表拉取失败：${msg} (code=${code})`);
+          // 按错误类型写入负缓存：隐藏 → 30 天；-412 封禁 → 指数退避；-352/-509 → 退避 + 全局熔断
+          if (code === 22118) { this._markUp(up, 'hidden', code, acc.id); break; }
+          if (code === -412) { this._markUp(up, 'banned', code, acc.id); break; }
+          if (code === -352 || code === -509) {
+            this._markUp(up, 'risk', code, acc.id);
+            this._tripBreaker(acc.id, code);
+            break upLoop;
+          }
+          if (code === -101) { break upLoop; }
+          this._markUp(up, 'err', code, acc.id);
           break;
         }
-        if (typeof j.data.total === 'number') total = j.data.total;
+        if (typeof j.data.total === 'number') { total = j.data.total; }
         const list = j.data.list || [];
         if (!list.length) break;
 
@@ -746,8 +850,15 @@ class Engine extends EventEmitter {
         pn++;
         await sleep(this.store.get().global.pageGap || 1200);
       }
+      advanced++;
+      if (!failed) this._markUp(up, 'ok', 0, acc.id);   // 扫描成功 → 清掉历史失败计数
       this._log(acc.id, 'info', `UP ${up} 扫描完毕，目前本轮关注 ${done} 人`);
     }
+
+    // 推进游标：本轮走过 advanced 个（含跳过的），下轮从下一个开始
+    if (advanced > 0) this.store.setUpCursor(acc.id, (start + advanced) % ups.length);
+    if (blockedSkip > 0) this._log(acc.id, 'info', `本轮跳过 ${blockedSkip} 个不可用来源（隐藏粉丝列表 / 风控退避 / 刚被其他账号扫描），未发请求`);
+
     this._pushStats(acc.id);
     this._log(acc.id, 'info', `${MODE_NAME.fansof} 结束｜本轮操作 ${done} 个`);
   }
@@ -789,6 +900,12 @@ class Engine extends EventEmitter {
       run.stats.fail++;
       this._log(acc.id, 'error', `关注失败 ${it.uname}：${r.message}`);
       this._push(acc.id, { uname: it.uname, mid: it.mid, result: '失败', detail: r.message, source });
+      // 已注销 / 隐私限制：记入跨账号共享的「不可关注」名单，之后直接跳过，不再浪费请求
+      if (/账号已注销|注销|隐私设置/.test(String(r.message || ''))) {
+        this.store.addDeadUser(it.mid, r.message);
+        this._log(acc.id, 'info', `${it.uname} (${it.mid}) 已记入「不可关注」名单，后续全账号跳过`);
+      }
+      if (r.code === -352 || r.code === -509) this._tripBreaker(acc.id, r.code);
       if (r.kind === 'fatal') { this._log(acc.id, 'error', '遇到致命错误码，本账号任务终止'); throw new Error(r.message); }
       await this._coolDown(acc.id, run, r);
       return 0;
