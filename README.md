@@ -75,10 +75,10 @@
 
 ## 安装使用
 
-> 当前产物在 **`dist/`**（v2.1.14）
+> 当前产物在 **`dist/`**（v2.1.15）
 
-方式一：安装版 —— `dist\B站关注管理台-2.1.14.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
-方式二：便携版 —— `dist\B站关注管理台-2.1.14-便携版.exe`（单文件约 96MB，双击即用，免安装）
+方式一：安装版 —— `dist\B站关注管理台-2.1.15.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
+方式二：便携版 —— `dist\B站关注管理台-2.1.15-便携版.exe`（单文件约 96MB，双击即用，免安装）
 方式三：免打包 —— `dist\win-unpacked\B站关注管理台.exe`（解压版，便于排查）
 
 已验证：打包后的 EXE 执行 `--selftest` 通过，结果写入 `%APPDATA%\bili-relation-manager\selftest.txt`。
@@ -133,7 +133,7 @@ bili-relation-manager/
 ```bash
 npm install
 npm start          # 开发模式运行
-npm test           # 全套测试：smoke 27 + engine 57 + ui 35 = 119 项
+npm test           # 全套测试：smoke 27 + engine 57 + ui 37 = 121 项
 node test/engine.js  # 仅功能离线测试（并发/上限/白名单/演练/停止/搜索找目标/回关率/自动循环/异常重启/看门狗/满关自救/源负缓存/轮转/节流/熔断，57 项）
 npm run build      # 打包 Windows x64，产出 nsis 安装包 + portable 单文件
 npm run clean:dist # 清理历史打包产物，只保留当前版本（删除 dist-v*、旧版 exe/blockmap、latest.yml）
@@ -149,12 +149,12 @@ node tools/verify-asar.js   # 打包后校验 asar 里文件齐全 + 版本标�
 2. 打 tag 并推送，创建 Release 后上传两个 EXE 作为资产：
 
 ```bash
-git tag v2.1.14 && git push origin v2.1.14
+git tag v2.1.15 && git push origin v2.1.15
 # 创建 Release（notes 取自 RELEASE_NOTES.md），上传两个 EXE + sha256sums.txt：
 GH_TOKEN=<github token> node tools/publish-release.js
 ```
 
-> 发布脚本会同时生成并上传 `sha256sums.txt`；应用内热更新下载后会校验 SHA256，不匹配直接中止（v2.1.14）。若校验文件缺失，更新仅退化为体积校验并提示。
+> 发布脚本会同时生成并上传 `sha256sums.txt`；应用内热更新下载后会校验 SHA256，不匹配直接中止（v2.1.15）。若校验文件缺失，更新仅退化为体积校验并提示。
 
 > 打包时若卡在下载（`Timeout awaiting 'request'`），先设国内镜像：
 > `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`，并确保 `LOCALAPPDATA` 有值（否则 electron-builder 缓存目录解析失败，每次都要重新下载工具链）。

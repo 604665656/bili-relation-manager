@@ -32,16 +32,20 @@ html, body {
 /* ── 顶栏 ── */
 .topbar {
   height: 54px; display: flex; align-items: center; justify-content: space-between;
-  padding: 0 16px; background: var(--bg2); border-bottom: 1px solid var(--line);
+  gap: 12px; padding: 0 16px; background: var(--bg2); border-bottom: 1px solid var(--line);
 }
-.brand { display: flex; align-items: baseline; gap: 10px; }
+/* v2.1.15：顶栏改为「左侧可压缩 + 右侧不换行」，构建标记过长时省略号截断，不再挤爆按钮 */
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 0 1 auto; overflow: hidden; }
 .logo {
-  font-weight: 800; font-size: 18px; letter-spacing: .5px;
+  flex: 0 0 auto; font-weight: 800; font-size: 18px; letter-spacing: .5px;
   background: linear-gradient(90deg, #fb7299, #ff9db6);
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
-.title { font-size: 15px; font-weight: 600; }
-.ver { font-size: 11px; color: var(--muted); }
+.title { font-size: 15px; font-weight: 600; white-space: nowrap; flex: 0 0 auto; }
+.ver {
+  font-size: 11px; color: var(--muted); white-space: nowrap;
+  max-width: 340px; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0;
+}
 
 /* 顶部「可更新 vX」常驻标记：粉色小药丸，点击回到更新弹窗 */
 .upd-badge {
@@ -61,7 +65,7 @@ html, body {
   70% { box-shadow: 0 0 0 7px rgba(251, 114, 153, 0); }
   100% { box-shadow: 0 0 0 0 rgba(251, 114, 153, 0); }
 }
-.actions { display: flex; gap: 8px; }
+.actions { display: flex; gap: 8px; flex: 0 0 auto; flex-wrap: nowrap; }
 
 .btn {
   background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
@@ -249,8 +253,11 @@ input[type=text]:focus { border-color: var(--pink); }
 .stat-acc-h .upd { font-weight: 400; font-size: 11px; color: #4d5a70; }
 /* 操作明细：时间列与日志时间样式保持一致 */
 .recbox table .rc-time, .recbox .rc-time { color: #4d5a70; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.stat-acc .kv { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11.5px; color: var(--muted); margin-bottom: 7px; }
-.stat-acc .kv b { color: #cbd6e8; margin-left: 4px; }
+.stat-acc .kv { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11.5px; color: var(--muted); margin-bottom: 7px; }
+.stat-acc .kv b { color: #cbd6e8; margin-left: 0; }
+/* v2.1.15：每个「标签 + 数值」包成一组，换行时不会被拆成两行 */
+.stat-acc .kv .mi { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.gain-na { color: #56637a; font-style: normal; }
 .stat-acc table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
 .stat-acc th, .stat-acc td { border-bottom: 1px solid #1e2735; padding: 3px 6px; text-align: left; }
 .stat-acc th { color: var(--muted); font-weight: 500; }

@@ -586,14 +586,18 @@ function renderStats() {
     const keys = Object.keys(by);
     rows.push(`<div class="stat-acc">
       <div class="stat-acc-h">${escapeHtml(a.uname)}　<span class="muted">UID ${a.uid}</span>${a.live && a.live.at ? `<span class="muted upd">更新于 ${time(a.live.at)}</span>` : ''}</div>
-      <div class="kv"><span>关注数</span><b>${fmtNum((a.live || {}).following)}</b>
-        <span>粉丝数</span><b>${fmtNum((a.live || {}).follower)}</b>
-        <span>今日操作</span><b>${(a.daily || {}).ops || 0}</b>
-        <span>待核验</span><b>${(fs.pendingVerify || []).length}</b></div>
-      <div class="kv gain"><span>今日新增粉</span><b>${fmtGain(followerGain('day', a))}</b>
-        <span>本周新增</span><b>${fmtGain(followerGain('week', a))}</b>
-        <span>本月新增</span><b>${fmtGain(followerGain('month', a))}</b>
-        <span>本年新增</span><b>${fmtGain(followerGain('year', a))}</b></div>
+      <div class="kv">
+        <span class="mi">关注数<b>${fmtNum((a.live || {}).following)}</b></span>
+        <span class="mi">粉丝数<b>${fmtNum((a.live || {}).follower)}</b></span>
+        <span class="mi">今日操作<b>${(a.daily || {}).ops || 0}</b></span>
+        <span class="mi">待核验<b>${(fs.pendingVerify || []).length}</b></span>
+      </div>
+      <div class="kv gain">
+        <span class="mi">今日新增粉${fmtGain(followerGain('day', a))}</span>
+        <span class="mi">本周新增${fmtGain(followerGain('week', a))}</span>
+        <span class="mi">本月新增${fmtGain(followerGain('month', a))}</span>
+        <span class="mi">本年新增${fmtGain(followerGain('year', a))}</span>
+      </div>
       ${keys.length ? `<table>
         <tr><th>来源</th><th>已关注</th><th>已核验</th><th>回关</th><th>回关率</th><th>状态</th></tr>
         ${keys.map((k) => {
@@ -741,7 +745,7 @@ function followerGain(period, a) {
   const log = (a && a.followerLog) || {};
   const cur = (a && a.live && a.live.follower) || 0;
   const keys = Object.keys(log).sort();
-  if (!keys.length) return 0;
+  if (!keys.length) return null;   // 还没任何快照 → 显示「—」
   const now = new Date();
   const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   let start;
@@ -754,9 +758,14 @@ function followerGain(period, a) {
     const dd = new Date(k + 'T00:00:00');
     if (dd < start) base = log[k]; else break;
   }
-  return base == null ? 0 : cur - base;
+  // 没有更早的快照 → 返回 null（界面显示「— / 基线不足」，不谎报 0）
+  return base == null ? null : cur - base;
 }
-function fmtGain(n) { return !n ? '0' : (n > 0 ? `<i class="dup">+${n}</i>` : `<i class="ddn">${n}</i>`); }
+function fmtGain(n) {
+  if (n == null) return '<i class="gain-na" title="基线不足：需至少 2 天粉丝快照才能算周期净增">—</i>';
+  if (!n) return '0';
+  return n > 0 ? `<i class="dup">+${n}</i>` : `<i class="ddn">${n}</i>`;
+}
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (m) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));

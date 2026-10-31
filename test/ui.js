@@ -193,17 +193,21 @@ t('followerGain 各周期净增计算正确（抽取真实函数验证）', () =
   const src = js.slice(startIdx, end + 1);
   const fn = eval('(' + src + ')');
   const mk = (cur, log) => ({ live: { follower: cur }, followerLog: log });
-  const today = new Date().toISOString().slice(0, 10);
-  const y = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  const wk = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-  const mo = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 15).toISOString().slice(0, 10);
+  // 必须用「本地日期」构造键：followerLog 自 v2.1.14 起统一写本地日期（RB9），
+  // 若测试仍用 toISOString()（UTC），本地 00:00–08:00 会算成昨天，掩盖基线判断。
+  const p2 = (n) => String(n).padStart(2, '0');
+  const ld = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+  const today = ld(new Date());
+  const y = ld(new Date(Date.now() - 86400000));
+  const wk = ld(new Date(Date.now() - 7 * 86400000));
+  const mo = ld(new Date(new Date().getFullYear(), new Date().getMonth() - 1, 15));
   assert.strictEqual(fn('day', mk(100, { [y]: 80 })), 20, '今日净增应为 +20');
   assert.strictEqual(fn('week', mk(100, { [wk]: 70 })), 30, '本周净增应为 +30');
   assert.strictEqual(fn('month', mk(100, { [mo]: 60 })), 40, '本月净增应为 +40');
-  // 无更早基线（仅有今日快照）→ 0
-  assert.strictEqual(fn('day', mk(100, { [today]: 100 })), 0, '无更早基线应为 0');
-  // 空日志 → 0
-  assert.strictEqual(fn('year', mk(100, {})), 0, '空日志应为 0');
+  // 无更早基线（仅有今日快照）→ null（界面显示「— / 基线不足」，不谎报 0）
+  assert.strictEqual(fn('day', mk(100, { [today]: 100 })), null, '无更早基线应返回 null');
+  // 空日志 → null
+  assert.strictEqual(fn('year', mk(100, {})), null, '空日志应返回 null');
 });
 
 console.log('\n[取关我的名单 (v2.1.13)]');
@@ -385,6 +389,21 @@ t('RB3/RB8 store 记录进内存但不立即落盘，flush 后持久化', () => 
   const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.strictEqual(disk.records.length, 1, 'flush 后记录应落盘（RB3）');
   fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+console.log('\n[v2.1.15 顶栏与统计排版]');
+
+t('顶栏：构建标记过长时省略号截断，按钮不被挤换行', () => {
+  assert.ok(/\.ver\s*\{[^}]*text-overflow:\s*ellipsis/.test(css), '.ver 缺少省略号截断');
+  assert.ok(/\.actions\s*\{[^}]*flex-wrap:\s*nowrap/.test(css), '.actions 应禁止换行');
+  assert.ok(/\.title\s*\{[^}]*white-space:\s*nowrap/.test(css), '.title 应禁止换行');
+  assert.ok(/\.brand\s*\{[^}]*min-width:\s*0/.test(css), '.brand 缺少 min-width:0');
+});
+
+t('统计：指标成组渲染，缺基线显示「—」而非 0', () => {
+  assert.ok(/<span class="mi">关注数<b>/.test(js), 'renderStats 未使用 .mi 分组');
+  assert.ok(/class="gain-na"[\s\S]{0,120}—/.test(js), 'fmtGain 未输出「—」占位');
+  assert.ok(/\.stat-acc \.kv \.mi\s*\{[^}]*white-space:\s*nowrap/.test(css), '缺少 .mi 不换行样式');
 });
 
 (async () => {

@@ -11,7 +11,7 @@ const { Updater } = require('./src/updater');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-01 审计修复：更新SHA256校验/断点续传·Cookie加密·明细落盘·本地日期·CSV注入防护·单实例锁等';
+const BUILD_TAG = '2026-11-01 审计修复 RB1-RB23';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */

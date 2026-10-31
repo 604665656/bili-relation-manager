@@ -77,7 +77,7 @@ const STATE = {
     ['ok', 'acc-1', '已关注 高漫手绘板 (401739957) 来源：搜索「手绘」'],
     ['info', 'acc-2', '第 2 轮结束，30 分钟后开始第 3 轮']
   ].map(([level, accountId, msg], i) => ({ level, accountId, msg, ts: Date.now() - (9 - i) * 50000 })),
-  version: '2.1.14', build: '2026-11-01 审计修复：更新SHA256校验/断点续传·Cookie加密·明细落盘·本地日期·CSV注入防护·单实例锁等',
+  version: '2.1.15', build: '2026-11-01 审计修复 RB1-RB23',
   writable: { ok: true, dir: 'C:\\Users\\x\\AppData\\Roaming\\bili-relation-manager' }
 };
 
