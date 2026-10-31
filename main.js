@@ -11,7 +11,7 @@ const { Updater } = require('./src/updater');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-30 21:30 修复更新版本比较';
+const BUILD_TAG = '2026-10-31 14:30 修复界面滚动/溢出（今日不截断·可拖动）';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */

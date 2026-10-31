@@ -84,7 +84,7 @@ html, body {
 }
 .panel {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden; min-height: 0; min-width: 0;
 }
 .panel-head {
   height: 38px; flex: 0 0 38px; display: flex; align-items: center; justify-content: space-between;
@@ -95,7 +95,7 @@ html, body {
 .muted { color: var(--muted); font-weight: 400; font-size: 11.5px; }
 
 /* ── 账号列表 ── */
-.acc-list { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.acc-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .acc-card {
   border: 1px solid var(--line); border-radius: 9px; padding: 9px 10px; cursor: pointer;
   background: #131a26; transition: .15s; position: relative;
@@ -107,7 +107,7 @@ html, body {
 .acc-meta { min-width: 0; flex: 1; }
 .acc-name { font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acc-sub { font-size: 11px; color: var(--muted); }
-.acc-ops { margin-top: 7px; display: flex; gap: 6px; }
+.acc-ops { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; }
 .chip {
   font-size: 10.5px; padding: 1px 7px; border-radius: 20px; border: 1px solid transparent; white-space: nowrap;
 }
@@ -127,7 +127,7 @@ html, body {
 /* ── 配置面板 ── */
 .cfg-body { padding: 10px 12px; overflow: auto; }
 /* 配置面板整体滚动：两段 cfg-body 若各自滚动，会把统计卡片切掉半排 */
-.panel.config { overflow-y: auto; overflow-x: hidden; }
+.panel.config { overflow: auto; min-width: 0; }
 .panel.config .cfg-body { overflow: visible; flex: 0 0 auto; }
 .panel.config .panel-head { position: sticky; top: 0; z-index: 2; }
 .panel.config .panel-head.sub { top: 38px; }
@@ -169,8 +169,8 @@ textarea { width: 100%; resize: vertical; font-family: inherit; line-height: 1.6
   padding: 3px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
 }
 .tab.active { background: #232f42; color: var(--txt); border-color: var(--line); }
-.tabpane { flex: 1; overflow: hidden; display: flex; }
-.logbox, .recbox { flex: 1; overflow: auto; padding: 8px 10px; }
+.tabpane { flex: 1; min-height: 0; overflow: hidden; display: flex; }
+.logbox, .recbox { flex: 1; min-height: 0; overflow: auto; padding: 8px 10px; }
 .logbox { font: 11.5px/1.75 Consolas, Menlo, monospace; }
 .logline { word-break: break-all; }
 .logline .t { color: #4d5a70; margin-right: 5px; }
