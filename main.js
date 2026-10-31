@@ -11,7 +11,7 @@ const { Updater } = require('./src/updater');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-31 14:30 修复界面滚动/溢出（今日不截断·可拖动）';
+const BUILD_TAG = '2026-10-31 14:50 新增粉丝统计(本/周/月/年)+操作明细与统计时间戳';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -244,7 +244,7 @@ async function refreshLiveStats() {
       if (s.code !== 0) continue;
       const d = store.setLive(a.id, s.following, s.follower);
       if (mainWindow) {
-        mainWindow.webContents.send('bus:live', { accountId: a.id, live: store.getAccount(a.id).live });
+        mainWindow.webContents.send('bus:live', { accountId: a.id, live: store.getAccount(a.id).live, followerLog: store.getAccount(a.id).followerLog || {} });
         mainWindow.webContents.send('bus:account', { id: a.id, state: engine.stateOf(a.id).state, live: store.getAccount(a.id).live });
       }
       if (d && (d.dFollowing || d.dFollower)) {
@@ -262,7 +262,7 @@ function publicAccount(a) {
     id: a.id, uid: a.uid, uname: a.uname, face: a.face,
     cfg: a.cfg, state: engine ? engine.stateOf(a.id).state : 'idle',
     stats: engine ? engine.stateOf(a.id).stats : null,
-    live: a.live, followStats: a.followStats, daily: a.daily
+    live: a.live, followStats: a.followStats, daily: a.daily, followerLog: a.followerLog || {}
   };
 }
 

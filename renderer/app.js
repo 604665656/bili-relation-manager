@@ -537,12 +537,13 @@ function logLine(l) {
 function renderRecords() {
   const box = $('#recbox');
   if (!ST.records.length) { box.innerHTML = '<p class="muted" style="padding:10px">暂无记录</p>'; return; }
-  let h = '<table><tr><th>昵称</th><th>UID</th><th>结果</th><th>说明</th><th>来源</th></tr>';
+  let h = '<table><tr><th class="rc-time">时间</th><th>昵称</th><th>UID</th><th>结果</th><th>说明</th><th>来源</th></tr>';
   for (const r of ST.records.slice().reverse().slice(0, 500)) {
     const cls = /成功|已取关|已回粉/.test(r.result) ? 'res-ok'
       : /失败/.test(r.result) ? 'res-fail'
         : /待/.test(r.result) ? 'res-pending' : 'res-skip';
-    h += `<tr><td>${escapeHtml(r.uname || '')}</td><td>${escapeHtml(String(r.mid))}</td>` +
+    h += `<tr><td class="rc-time">${escapeHtml(time(r.ts))}</td>` +
+      `<td>${escapeHtml(r.uname || '')}</td><td>${escapeHtml(String(r.mid))}</td>` +
       `<td class="${cls}">${escapeHtml(r.result || '')}</td><td>${escapeHtml(r.detail || '')}</td>` +
       `<td>${escapeHtml(r.source ? sourceShort(r.source) : '')}</td></tr>`;
   }
@@ -557,11 +558,15 @@ function renderStats() {
     const by = fs.bySource || {};
     const keys = Object.keys(by);
     rows.push(`<div class="stat-acc">
-      <div class="stat-acc-h">${escapeHtml(a.uname)}　<span class="muted">UID ${a.uid}</span></div>
+      <div class="stat-acc-h">${escapeHtml(a.uname)}　<span class="muted">UID ${a.uid}</span>${a.live && a.live.at ? `<span class="muted upd">更新于 ${time(a.live.at)}</span>` : ''}</div>
       <div class="kv"><span>关注数</span><b>${fmtNum((a.live || {}).following)}</b>
         <span>粉丝数</span><b>${fmtNum((a.live || {}).follower)}</b>
         <span>今日操作</span><b>${(a.daily || {}).ops || 0}</b>
         <span>待核验</span><b>${(fs.pendingVerify || []).length}</b></div>
+      <div class="kv gain"><span>今日新增粉</span><b>${fmtGain(followerGain('day', a))}</b>
+        <span>本周新增</span><b>${fmtGain(followerGain('week', a))}</b>
+        <span>本月新增</span><b>${fmtGain(followerGain('month', a))}</b>
+        <span>本年新增</span><b>${fmtGain(followerGain('year', a))}</b></div>
       ${keys.length ? `<table>
         <tr><th>来源</th><th>已关注</th><th>已核验</th><th>回关</th><th>回关率</th><th>状态</th></tr>
         ${keys.map((k) => {
@@ -610,6 +615,7 @@ function onLive(d) {
   const a = ST.accounts.find((x) => x.id === d.accountId);
   if (!a || !d.live) return;
   a.live = d.live;
+  if (d.followerLog) a.followerLog = d.followerLog;
   renderAccounts();
   renderStats();
 }
@@ -639,6 +645,27 @@ function delta(n) {
   if (!n) return '<i class="d0">±0</i>';
   return n > 0 ? `<i class="dup">+${n}</i>` : `<i class="ddn">${n}</i>`;
 }
+/** 粉丝净增：当前粉丝数 − 周期起点（本周一/本月1号/本年1月1号，或今天00:00取昨天基线） */
+function followerGain(period, a) {
+  const log = (a && a.followerLog) || {};
+  const cur = (a && a.live && a.live.follower) || 0;
+  const keys = Object.keys(log).sort();
+  if (!keys.length) return 0;
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let start;
+  if (period === 'day') start = d;                                   // 今天 00:00 → 基线取昨天
+  else if (period === 'week') { d.setDate(d.getDate() - d.getDay()); start = d; }   // 周一
+  else if (period === 'month') { d.setDate(1); start = d; }          // 本月 1 号
+  else { d.setMonth(0, 1); start = d; }                              // 本年 1 月 1 日
+  let base = null;
+  for (const k of keys) {
+    const dd = new Date(k + 'T00:00:00');
+    if (dd < start) base = log[k]; else break;
+  }
+  return base == null ? 0 : cur - base;
+}
+function fmtGain(n) { return !n ? '0' : (n > 0 ? `<i class="dup">+${n}</i>` : `<i class="ddn">${n}</i>`); }
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (m) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));

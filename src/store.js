@@ -151,6 +151,8 @@ class Store {
       ),
       // 每日操作计数
       daily: Object.assign({ date: '', ops: 0 }, a.daily || {}),
+      // 粉丝数按天快照：用于计算「今日/本周/本月/本年 新增粉丝」
+      followerLog: (a.followerLog && typeof a.followerLog === 'object' && !Array.isArray(a.followerLog)) ? a.followerLog : {},
       // 「指定 UP」轮转游标：记住上轮扫到列表第几个，下轮从这里继续（避免只扫头部）
       upCursor: Number(a.upCursor) || 0
     };
@@ -381,6 +383,14 @@ class Store {
       follower: follower == null ? a.live.follower : follower,
       prevFollowing: dF, prevFollower: dR, at: Date.now()
     };
+    // 记录每日粉丝快照（用于「新增粉丝」周期统计），保留最近 400 天
+    if (follower != null) {
+      const day = new Date().toISOString().slice(0, 10);
+      a.followerLog = a.followerLog || {};
+      a.followerLog[day] = follower;
+      const keys = Object.keys(a.followerLog).sort();
+      if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete a.followerLog[k];
+    }
     this.flush();
     return { following: a.live.following, follower: a.live.follower, dFollowing: dF, dFollower: dR };
   }

@@ -161,5 +161,50 @@ t('顶部「可更新」常驻标记就位', () => {
   assert.ok(/\.upd-badge\s*\{[^}]*display:\s*none/.test(css), '标记默认 display 应为 none（显隐交给 JS）');
 });
 
+console.log('\n[新增粉丝统计与时间戳]');
+
+t('操作明细表含「时间」列（与日志时间戳一致）', () => {
+  assert.ok(/<th[^>]*class="rc-time"[^>]*>时间<\/th>/.test(js), 'renderRecords 缺少时间列');
+  assert.ok(/<td class="rc-time">\$\{escapeHtml\(time\(r\.ts\)\)\}/.test(js), 'renderRecords 未用 time(r.ts) 渲染时间');
+});
+
+t('统计卡片含「更新于」时间戳', () => {
+  assert.ok(/更新于/.test(js), 'renderStats 缺少「更新于」时间戳');
+  // 数据来自 a.live.at（main.js setLive 每次刷新写入的时间戳）
+  assert.ok(/a\.live && a\.live\.at/.test(js), '统计未读取 a.live.at 作为更新时间');
+});
+
+t('统计卡片含 本/周/月/年 新增粉丝指标', () => {
+  for (const k of ['今日新增粉', '本周新增', '本月新增', '本年新增']) {
+    assert.ok(js.includes(k), 'renderStats 缺少指标 ' + k);
+  }
+  assert.ok(/followerGain\(/.test(js), 'renderStats 未调用 followerGain');
+});
+
+t('followerGain 各周期净增计算正确（抽取真实函数验证）', () => {
+  const startIdx = js.indexOf('function followerGain');
+  assert.ok(startIdx >= 0, 'app.js 未找到 followerGain');
+  let i = js.indexOf('{', startIdx), depth = 0, end = -1;
+  for (; i < js.length; i++) {
+    if (js[i] === '{') depth++;
+    else if (js[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  assert.ok(end > startIdx, '无法定位 followerGain 函数体');
+  const src = js.slice(startIdx, end + 1);
+  const fn = eval('(' + src + ')');
+  const mk = (cur, log) => ({ live: { follower: cur }, followerLog: log });
+  const today = new Date().toISOString().slice(0, 10);
+  const y = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const wk = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  const mo = new Date(new Date().getFullYear(), new Date().getMonth() - 1, 15).toISOString().slice(0, 10);
+  assert.strictEqual(fn('day', mk(100, { [y]: 80 })), 20, '今日净增应为 +20');
+  assert.strictEqual(fn('week', mk(100, { [wk]: 70 })), 30, '本周净增应为 +30');
+  assert.strictEqual(fn('month', mk(100, { [mo]: 60 })), 40, '本月净增应为 +40');
+  // 无更早基线（仅有今日快照）→ 0
+  assert.strictEqual(fn('day', mk(100, { [today]: 100 })), 0, '无更早基线应为 0');
+  // 空日志 → 0
+  assert.strictEqual(fn('year', mk(100, {})), 0, '空日志应为 0');
+});
+
 console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
 process.exit(fail ? 1 : 0);

@@ -225,7 +225,10 @@ input[type=text] {
 input[type=text]:focus { border-color: var(--pink); }
 
 .stat-acc { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin-bottom: 9px; background: #131a26; }
-.stat-acc-h { font-weight: 600; font-size: 12.5px; margin-bottom: 6px; }
+.stat-acc-h { font-weight: 600; font-size: 12.5px; margin-bottom: 6px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.stat-acc-h .upd { font-weight: 400; font-size: 11px; color: #4d5a70; }
+/* 操作明细：时间列与日志时间样式保持一致 */
+.recbox table .rc-time, .recbox .rc-time { color: #4d5a70; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .stat-acc .kv { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11.5px; color: var(--muted); margin-bottom: 7px; }
 .stat-acc .kv b { color: #cbd6e8; margin-left: 4px; }
 .stat-acc table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
