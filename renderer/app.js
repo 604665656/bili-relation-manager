@@ -4,7 +4,17 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 
-const ST = { accounts: [], global: {}, selected: null, records: [], logs: [], busy: false };
+const ST = { accounts: [], global: {}, selected: null, records: [], logs: [], busy: false, tab: 'log' };
+
+/* RB17：高频事件合并渲染——同一 key 在一帧内只重建一次 DOM，避免每条 record/stats 都全量重绘 */
+const _pendingRender = new Set();
+function scheduleRender(key, fn) {
+  if (_pendingRender.has(key)) return;
+  _pendingRender.add(key);
+  const run = () => { _pendingRender.delete(key); try { fn(); } catch (e) { /* ignore */ } };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 50);
+}
 const UPD = { info: null, busy: false };   // 热更新状态
 
 /* ─────────── 启动 ─────────── */
@@ -39,6 +49,7 @@ async function reloadState() {
   ST.accounts = s.accounts || [];
   ST.global = s.global || {};
   ST.logs = s.logs || [];
+  ST.records = s.records || [];   // RB3：操作明细落盘后，重启仍能显示历史
   if (s.version) $('#ver').textContent = `v${s.version}${s.build ? ' · ' + s.build : ''}`;
   if (s.writable && s.writable.ok === false) {
     $('#status').innerHTML =
@@ -124,7 +135,7 @@ function wireEvents() {
     '#cfg-watchdog', '#cfg-capguard-reserve',
     '#cfg-keywords', '#cfg-searchpages', '#cfg-maxfans', '#cfg-minlevel']
     .forEach((sel) => $(sel).addEventListener('change', autoSaveCfg));
-  ['#cfg-official', '#cfg-special', '#cfg-dry', '#cfg-days', '#cfg-loop', '#cfg-capguard']
+  ['#cfg-official', '#cfg-special', '#cfg-skipvip', '#cfg-dry', '#cfg-days', '#cfg-loop', '#cfg-capguard']
     .forEach((sel) => $(sel).addEventListener('change', () => { autoSaveCfg(); renderSelected(); }));
   // 任务类型 / 来源都是多选：勾完立刻存盘并刷新可见行
   ['#task-unfollow', '#task-follow', '#src-fans', '#src-search', '#src-ups']
@@ -133,10 +144,17 @@ function wireEvents() {
   $$('.tab').forEach((t) => t.onclick = () => {
     $$('.tab').forEach((x) => x.classList.remove('active'));
     t.classList.add('active');
-    $('#pane-log').hidden = t.dataset.tab !== 'log';
-    $('#pane-record').hidden = t.dataset.tab !== 'record';
-    $('#pane-stat').hidden = t.dataset.tab !== 'stat';
+    const tab = t.dataset.tab;
+    ST.tab = tab;
+    $('#pane-log').hidden = tab !== 'log';
+    $('#pane-record').hidden = tab !== 'record';
+    $('#pane-stat').hidden = tab !== 'stat';
+    $('#pane-unfollower').hidden = tab !== 'unfollower';
+    if (tab === 'unfollower') renderUnfollowers();
   });
+  $('#btn-export-unfollower').onclick = doExportUnfollowers;
+  $('#unfollowerbox').addEventListener('click', onUnfollowerBoxClick);
+  $('#cfg-track-unfollowers').addEventListener('change', autoSaveCfg);
 }
 
 function readCfgForm() {
@@ -160,6 +178,7 @@ function readCfgForm() {
     dryRun: $('#cfg-dry').checked,
     skipOfficial: $('#cfg-official').checked,
     skipSpecial: $('#cfg-special').checked,
+    skipVip: $('#cfg-skipvip').checked,
     autoLoop: $('#cfg-loop').checked,
     loopIntervalMin: clampInt($('#cfg-loop-min').value, 1, 1440, 30),
     dailyCap: clampInt($('#cfg-daily').value, 0, 2000, 0),
@@ -169,7 +188,8 @@ function readCfgForm() {
     minFollowDays: clampInt($('#cfg-days-n').value, 1, 365, 7),
     capGuard: $('#cfg-capguard').checked,
     capGuardReserve: clampInt($('#cfg-capguard-reserve').value, 0, 4900, 100),
-    targetUps: String($('#cfg-targets').value || '').trim()
+    targetUps: String($('#cfg-targets').value || '').trim(),
+    trackUnfollowers: $('#cfg-track-unfollowers').checked
   };
 }
 /** 依据勾选情况显示 / 隐藏相关输入行 */
@@ -391,7 +411,10 @@ async function doSaveGlobal() {
     rateMinSample: clampInt($('#g-sample').value, 5, 500, 20),
     rateVerifyGapHours: clampInt($('#g-gap').value, 1, 168, 24),
     statIntervalMin: clampInt($('#g-statint').value, 1, 60, 5),
-    followCap: clampInt($('#g-followcap').value, 0, 100000, 5000)
+    followCap: clampInt($('#g-followcap').value, 0, 100000, 5000),
+    quietHours: String($('#g-quiet').value || '').trim(),
+    restDays: String($('#g-restdays').value || '').split(/[\s,，;；]+/)
+      .map((x) => parseInt(x, 10)).filter((n) => n >= 0 && n <= 6)
   };
   const never = String($('#g-never').value || '').split(/[\s,，;；\n]+/).filter(Boolean);
   const r = await window.api.updateGlobal(g);
@@ -478,6 +501,7 @@ function renderSelected() {
   $('#cfg-dry').checked = !!cfg.dryRun;
   $('#cfg-official').checked = !!cfg.skipOfficial;
   $('#cfg-special').checked = !!cfg.skipSpecial;
+  $('#cfg-skipvip').checked = !!cfg.skipVip;
   $('#cfg-days').checked = !!cfg.onlyAfterDays;
   $('#cfg-days-n').value = cfg.minFollowDays || 7;
   $('#cfg-capguard').checked = cfg.capGuard !== false;
@@ -487,6 +511,7 @@ function renderSelected() {
   $('#cfg-daily').value = cfg.dailyCap || 0;
   $('#cfg-errretry').value = (cfg.errRetryMin == null ? 0 : cfg.errRetryMin);
   $('#cfg-watchdog').value = (cfg.watchdogStallMin == null ? 15 : cfg.watchdogStallMin);
+  $('#cfg-track-unfollowers').checked = cfg.trackUnfollowers !== false;
   syncCfgVisibility(cfg);
 
   const s = a.stats || {};
@@ -513,6 +538,8 @@ function fillGlobalForm() {
   $('#g-gap').value = g.rateVerifyGapHours || 24;
   $('#g-statint').value = g.statIntervalMin || 5;
   $('#g-followcap').value = (g.followCap == null ? 5000 : g.followCap);
+  $('#g-quiet').value = g.quietHours || '';
+  $('#g-restdays').value = (g.restDays || []).join(',');
   $('#g-autostart').checked = !!(g.autoStartOnLaunch);
   $('#never-count').textContent = `　共 ${(g.neverFollow || []).length} 个`;
 }
@@ -585,12 +612,74 @@ function renderStats() {
     : '<p class="muted" style="padding:10px">请先登录账号</p>';
 }
 
+function renderUnfollowers() {
+  const box = $('#unfollowerbox');
+  const a = ST.accounts.find((x) => x.id === ST.selected);
+  if (!a) { box.innerHTML = '<p class="muted" style="padding:10px">请先登录账号</p>'; return; }
+  const list = (a.unfollowers || []);
+  const btn = $('#btn-export-unfollower');
+  if (btn) btn.disabled = !list.length;
+  if (!list.length) {
+    box.innerHTML = '<p class="muted" style="padding:10px">暂无取关记录。<br>' +
+      '本功能每日自动比对一次粉丝快照，发现「关注你后又取关」的人会记到这里。<br>' +
+      '首次运行会先建立粉丝基线，之后每天比对（若某天没跑任务则跳过当天比对）。<br>' +
+      '<span class="warnline">注意：B站 粉丝列表接口仅开放前 1000 条，粉丝数超过 1000 的账号无法覆盖更早的取关者。</span></p>';
+    return;
+  }
+  let h = '<table><tr><th>日期</th><th>昵称</th><th>UID</th><th>状态</th><th>操作</th></tr>';
+  for (const u of list.slice().reverse().slice(0, 1000)) {
+    const handled = u.handled;
+    const stTxt = handled === 'blocked' ? '已拉黑' : handled === 'ignored' ? '已忽略'
+      : handled === 'auto' ? '自动记录' : '未处理';
+    const cls = (handled === 'blocked' || handled === 'ignored') ? 'res-skip' : 'res-pending';
+    const ops = (handled === 'blocked' || handled === 'ignored')
+      ? ''
+      : `<button class="mini danger" data-act="block" data-mid="${escapeAttr(u.mid)}">加入黑名单</button>` +
+        `<button class="mini" data-act="ignore" data-mid="${escapeAttr(u.mid)}">忽略</button>`;
+    h += `<tr><td>${escapeHtml(u.date || '')}</td>` +
+      `<td>${escapeHtml(u.uname || '')}</td><td>${escapeHtml(String(u.mid))}</td>` +
+      `<td class="${cls}">${stTxt}</td><td class="ub-ops">${ops}</td></tr>`;
+  }
+  box.innerHTML = h + '</table>';
+}
+
+async function reloadUnfollowers(id) {
+  try { const r = await window.api.unfollowerList(id); return (r && r.list) || []; }
+  catch (e) { return []; }
+}
+
+async function doExportUnfollowers() {
+  if (!ST.selected) return;
+  const r = await window.api.unfollowerExport(ST.selected);
+  if (!r.ok) return toast('导出失败：' + ((r && r.error) || ''));
+  toast(`已导出 ${r.rows} 条记录 → ${r.path}`);
+}
+
+async function onUnfollowerBoxClick(e) {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn || !ST.selected) return;
+  const mid = btn.dataset.mid;
+  const act = btn.dataset.act;
+  btn.disabled = true;
+  const r = await window.api.unfollowerMark(ST.selected, mid, act === 'ignore' ? 'ignored' : 'blocked');
+  if (r && r.ok) {
+    const a = ST.accounts.find((x) => x.id === ST.selected);
+    if (a) a.unfollowers = await reloadUnfollowers(ST.selected);
+    if (r.neverFollow) ST.global.neverFollow = r.neverFollow;
+    renderUnfollowers();
+    toast(act === 'ignore' ? '已忽略该用户' : '已加入黑名单');
+  } else {
+    toast('操作失败：' + ((r && r.error) || '未知'));
+    btn.disabled = false;
+  }
+}
+
 /* ─────────── 事件回调 ─────────── */
 function onLog(l) { appendLog(l); }
 function onRecord(r) {
   ST.records.push(r);
   if (ST.records.length > 3000) ST.records.shift();
-  renderRecords();
+  scheduleRender('records', renderRecords);
 }
 function onAccountState(d) {
   const a = ST.accounts.find((x) => x.id === d.id);
@@ -607,9 +696,11 @@ function onStats(d) {
   a.followStats = d.followStats || a.followStats;
   a.live = d.live || a.live;
   a.daily = d.daily || a.daily;
+  if (d.unfollowers) a.unfollowers = d.unfollowers;
   renderAccounts();
   if (d.accountId === ST.selected) renderSelected();
-  renderStats();
+  scheduleRender('stats', renderStats);
+  if (d.accountId === ST.selected && ST.tab === 'unfollower') scheduleRender('unfollower', renderUnfollowers);
 }
 function onLive(d) {
   const a = ST.accounts.find((x) => x.id === d.accountId);

@@ -54,6 +54,11 @@
           </div>
         </div>
 
+        <div class="row">
+          <label class="cb strong"><input type="checkbox" id="cfg-track-unfollowers"> 记录「取关我的名单」
+            <span class="hint">每日自动拉取粉丝列表快照并比对，记录「关注你后又取关」的人，并自动加入「不再回关」名单（仅读取，不改动 B站 关系）</span></label>
+        </div>
+
         <div class="row col" id="row-sources">
           <label class="lbl">目标来源（可多选）</label>
           <div class="checks">
@@ -98,6 +103,7 @@
           <input type="number" id="cfg-limit" min="1" max="500">
           <label class="cb"><input type="checkbox" id="cfg-official"> 跳过认证账号</label>
           <label class="cb"><input type="checkbox" id="cfg-special"> 跳过特别关注</label>
+          <label class="cb"><input type="checkbox" id="cfg-skipvip"> 跳过大会员</label>
         </div>
 
         <div class="row">
@@ -180,6 +186,15 @@
           <input type="number" id="g-followcap" min="0" max="100000" step="100"> 人
           <span class="hint">关注数达到该值就跳过「自动关注」，防止被 B 站拒绝；普通账号 5000，大会员可调高；0 = 关闭。账号配置里的「满关自救」会在此基础上提前预留名额、立即清理</span>
         </div>
+        <div class="row">
+          <label class="lbl">休息时段</label>
+          <input type="text" id="g-quiet" placeholder="如 23:00-08:00，留空=不限">
+          <label class="lbl">每周休息日</label>
+          <input type="text" id="g-restdays" placeholder="0=周日…6=周六，逗号分隔，留空=不限">
+        </div>
+        <div class="row">
+          <span class="hint">命中休息时段 / 休息日时，自动循环会暂停到窗口结束后再继续（可随时手动停止）。社区经验：留出零动作窗口能显著降低被识别为脚本的概率。</span>
+        </div>
         <div class="row col">
           <label class="lbl">全局白名单 UID（逗号/空格/换行分隔，对所有账号生效）</label>
           <textarea id="g-white" rows="2" placeholder="例如：123456 889900"></textarea>
@@ -203,18 +218,26 @@
           <button class="tab active" data-tab="log">日志</button>
           <button class="tab" data-tab="record">操作明细</button>
           <button class="tab" data-tab="stat">统计</button>
+          <button class="tab" data-tab="unfollower">取关</button>
         </div>
       </div>
       <div class="tabpane" id="pane-log"><div class="logbox" id="logbox"></div></div>
       <div class="tabpane" id="pane-record" hidden><div class="recbox" id="recbox"></div></div>
       <div class="tabpane" id="pane-stat" hidden><div class="recbox" id="statbox"></div></div>
+      <div class="tabpane" id="pane-unfollower" hidden>
+        <div class="pane-toolbar">
+          <button class="btn ghost small" id="btn-export-unfollower">导出 CSV</button>
+          <span class="muted" id="unfollower-tip">每日自动比对「关注你后又取关」的人；受 B站 接口限制仅覆盖最近 1000 名粉丝</span>
+        </div>
+        <div class="recbox" id="unfollowerbox"></div>
+      </div>
     </section>
   </main>
 
   <footer class="statusbar">
     <span id="status">就绪</span>
     <span class="grow"></span>
-    <span class="warn-tip">单次 ≤ 50 · 间隔 ≥ 3 秒 · 触发 -509 / -352 请立即停止</span>
+    <span class="warn-tip">按你配置的间隔/上限执行 · 触发 -509 / -352 请立即停止</span>
   </footer>
 
   <!-- 扫码登录进行中提示条 -->

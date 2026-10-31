@@ -206,5 +206,208 @@ t('followerGain 各周期净增计算正确（抽取真实函数验证）', () =
   assert.strictEqual(fn('year', mk(100, {})), 0, '空日志应为 0');
 });
 
-console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
-process.exit(fail ? 1 : 0);
+console.log('\n[取关我的名单 (v2.1.13)]');
+
+t('HTML 含「取关」tab、面板、导出按钮、配置项', () => {
+  assert.ok(/data-tab="unfollower"/.test(html), '缺少 data-tab="unfollower"');
+  for (const id of ['pane-unfollower', 'unfollowerbox', 'btn-export-unfollower', 'cfg-track-unfollowers']) {
+    assert.ok(htmlIds.has(id), `缺少 #${id}`);
+  }
+  // 面板初始应隐藏
+  assert.ok(/<div class="tabpane" id="pane-unfollower" hidden>/.test(html), '取关面板初始应带 hidden');
+});
+
+t('app.js 实现取关名单渲染与导出/标记交互', () => {
+  assert.ok(/function renderUnfollowers\(\)/.test(js), '缺少 renderUnfollowers');
+  assert.ok(/function doExportUnfollowers\(\)/.test(js), '缺少 doExportUnfollowers');
+  assert.ok(/function onUnfollowerBoxClick\(/.test(js), '缺少 onUnfollowerBoxClick');
+  assert.ok(/renderUnfollowers\(\)/.test(js), 'tab 切换未调用 renderUnfollowers');
+  assert.ok(/\$\('#btn-export-unfollower'\)\.onclick\s*=\s*doExportUnfollowers/.test(js), '导出按钮未绑定');
+  // 标记：数据属性 data-act + data-mid 用于事件委托
+  assert.ok(/data-act="block"/.test(js) && /data-act="ignore"/.test(js), 'renderUnfollowers 未渲染标记按钮');
+  // 标记后回写 neverFollow（自动加入不再回关）
+  assert.ok(/neverFollow:\s*r\.neverFollow/.test(js) || /ST\.global\.neverFollow\s*=\s*r\.neverFollow/.test(js), '标记后未同步 neverFollow 名单');
+});
+
+t('任务配置含 trackUnfollowers 且被读写', () => {
+  assert.ok(/trackUnfollowers:/.test(js), 'readCfgForm 缺少 trackUnfollowers');
+  assert.ok(/\$\('#cfg-track-unfollowers'\)\.checked\s*=\s*cfg\.trackUnfollowers\s*!==\s*false/.test(js), 'renderSelected 未回填 trackUnfollowers（默认开启）');
+  assert.ok(/\$\('#cfg-track-unfollowers'\)\.addEventListener\('change', autoSaveCfg\)/.test(js), '配置项未绑定自动保存');
+});
+
+t('preload 暴露取关名单 API', () => {
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
+  for (const m of ['unfollowerList', 'unfollowerMark', 'unfollowerExport']) {
+    assert.ok(new RegExp(`\\b${m}:`).test(preload), 'preload 缺少 ' + m);
+  }
+});
+
+t('main.js 提供取关名单 IPC + publicAccount 透传 unfollowers', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  for (const ch of ['unfollower:list', 'unfollower:mark', 'unfollower:export']) {
+    assert.ok(new RegExp(`ipcMain\.handle\\('${ch}'`).test(main), 'main.js 缺少 ' + ch);
+  }
+  assert.ok(/unfollowers:\s*a\.unfollowers\s*\|\|\s*\[\]/.test(main), 'publicAccount 未透传 unfollowers');
+  assert.ok(/function exportUnfollowersCsv\(/.test(main), '缺少 exportUnfollowersCsv');
+});
+
+t('task.js 每日比对取关者：调用点 + 差集逻辑', () => {
+  const task = fs.readFileSync(path.join(__dirname, '..', 'src', 'task.js'), 'utf8');
+  assert.ok(/_phaseUnfollowers\(acc, run, client\)/.test(task), '主循环未调用 _phaseUnfollowers');
+  assert.ok(/async _phaseUnfollowers\(acc, run, client\)/.test(task), '缺少 _phaseUnfollowers 方法');
+  assert.ok(/diffUnfollowers\(prevSnap, list\)/.test(task), '未复用 diffUnfollowers 算取关者');
+  // 受 B站 1000 条上限约束：应有提示分支
+  assert.ok(/接口上限|前 1000|1000/.test(task), '缺少粉丝 1000 条上限提示');
+  // 每日节流：同一天已建基线则跳过
+  assert.ok(/today && prevSnap\.length > 0/.test(task) || /lastFollowerSnapDate === today/.test(task), '缺少每日节流判断');
+});
+
+t('store 取关名单数据层：快照/记录/标记/差集', () => {
+  const { Store, diffUnfollowers } = require(path.join(__dirname, '..', 'src', 'store'));
+  const os = require('os');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'brm-uf-'));
+  const store = new Store(tmp);
+  store.load();
+  const acc = store.upsertAccount({ uid: 111, uname: '测试号', cookie: 'x' });
+  const id = acc.id;
+
+  // 差集：prev 有 1/2/3，curr 有 1 → 2、3 取关
+  const diff = diffUnfollowers(
+    [{ mid: '1', uname: 'a' }, { mid: '2', uname: 'b' }, { mid: 3, uname: 'c' }],
+    [{ mid: '1', uname: 'a' }]
+  );
+  assert.deepStrictEqual(diff.map((x) => x.mid).sort(), ['2', '3'], 'diffUnfollowers 结果应为 2、3');
+  assert.strictEqual(diff[0].uname, diff.find((x) => x.mid === '2').uname || 'b', '应保留昵称');
+
+  // 基线快照
+  store.setFollowerSnapshot(id, [{ mid: '1', uname: 'a' }, { mid: '2', uname: 'b' }]);
+  let a = store.getAccount(id);
+  assert.ok(a.followerSnapshot.length === 2, '快照应写入 2 条');
+  assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(a.lastFollowerSnapDate), '快照日期应为 YYYY-MM-DD');
+
+  // 记录取关者 + 自动加入不再回关
+  store.addUnfollowers(id, [{ mid: '2', uname: 'b' }]);
+  store.addNeverFollow('2');
+  a = store.getAccount(id);
+  assert.strictEqual(a.unfollowers.length, 1, 'unfollowers 应 1 条');
+  assert.strictEqual(a.unfollowers[0].handled, 'auto', '新建记录 handled 应为 auto');
+  assert.ok(store.inNeverFollow('2'), '取关者应自动加入 neverFollow');
+
+  // 手动标记忽略 / 拉黑
+  store.markUnfollower(id, '2', 'ignored');
+  assert.strictEqual(store.getAccount(id).unfollowers[0].handled, 'ignored', '应标记为 ignored');
+  store.markUnfollower(id, '2', 'blocked');
+  assert.strictEqual(store.getAccount(id).unfollowers[0].handled, 'blocked', '应标记为 blocked');
+  assert.ok(store.inNeverFollow('2'), 'blocked 后仍在 neverFollow');
+
+  // listUnfollowers 透传
+  assert.strictEqual(store.listUnfollowers(id).length, 1, 'listUnfollowers 应返回 1 条');
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+console.log('\n[审计修复 v2.1.14]');
+
+const MAIN = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+const STORE = fs.readFileSync(path.join(__dirname, '..', 'src', 'store.js'), 'utf8');
+const TASK = fs.readFileSync(path.join(__dirname, '..', 'src', 'task.js'), 'utf8');
+const UPCORE = fs.readFileSync(path.join(__dirname, '..', 'src', 'updater-core.js'), 'utf8');
+const UPD = fs.readFileSync(path.join(__dirname, '..', 'src', 'updater.js'), 'utf8');
+const PUB = fs.readFileSync(path.join(__dirname, '..', 'tools', 'publish-release.js'), 'utf8');
+
+t('RB12 大会员过滤：配置项 + 读写 + 引擎判断', () => {
+  assert.ok(htmlIds.has('cfg-skipvip'), '缺少 #cfg-skipvip');
+  assert.ok(/skipVip:\s*\$\('#cfg-skipvip'\)\.checked/.test(js), 'readCfgForm 未读 skipVip');
+  assert.ok(/\$\('#cfg-skipvip'\)\.checked\s*=\s*!!cfg\.skipVip/.test(js), 'renderSelected 未回填 skipVip');
+  assert.ok(TASK.includes('cfg.skipVip') && TASK.includes('it.vip'), '_skipReason 未处理 skipVip');
+});
+
+t('RB20 休息时段：全局配置 + 引擎暂停', () => {
+  for (const id of ['g-quiet', 'g-restdays']) assert.ok(htmlIds.has(id), '缺少 #' + id);
+  assert.ok(/quietHours:/.test(js) && /restDays:/.test(js), 'doSaveGlobal 未读写休息配置');
+  assert.ok(TASK.includes('_quietRemainMs()'), '缺少 _quietRemainMs');
+  assert.ok(TASK.includes('quiet.ms'), '循环未使用休息等待');
+});
+
+t('RB17 渲染节流：scheduleRender 合并高频事件', () => {
+  assert.ok(/function scheduleRender\(/.test(js), '缺少 scheduleRender');
+  assert.ok(/scheduleRender\('records', renderRecords\)/.test(js), 'onRecord 未节流');
+  assert.ok(/scheduleRender\('stats', renderStats\)/.test(js), 'onStats 未节流');
+});
+
+t('RB15/RB18 CSV 公式注入防护且两处导出统一', () => {
+  assert.ok(MAIN.includes('[=+\\-@\\t\\r]'), 'escapeCell 缺少公式前缀防护');
+  assert.ok(/exportUnfollowersCsv[\s\S]{0,900}escapeCell/.test(MAIN), '取关 CSV 未复用 escapeCell');
+});
+
+t('RB1/RB13 更新 SHA256 校验 + 断点续传 + 发布产出校验文件', () => {
+  assert.ok(/function sha256File\(/.test(UPCORE), '缺少 sha256File');
+  assert.ok(/function parseChecksums\(/.test(UPCORE), '缺少 parseChecksums');
+  assert.ok(/sha256File\(dest\)/.test(UPD), '下载后未校验 SHA256');
+  assert.ok(/Range/.test(UPD), '未实现断点续传');
+  assert.ok(/sha256sums/.test(UPD), '未识别校验文件');
+  assert.ok(/sha256sums\.txt/.test(PUB), '发布脚本未产出校验文件');
+});
+
+t('RB2 Cookie 加密 / RB11 单实例 / RB19 异常日志', () => {
+  assert.ok(/safeStorage/.test(MAIN) && /encryptString/.test(MAIN), '未用 safeStorage 加密 cookie');
+  assert.ok(/requestSingleInstanceLock/.test(MAIN), '缺少单实例锁');
+  assert.ok(/uncaughtException[\s\S]{0,400}addLog/.test(MAIN), 'uncaughtException 未写日志');
+});
+
+t('RB3 明细落盘 / RB6 清理 / RB8 延迟落盘 / RB9 本地日期', () => {
+  assert.ok(/addRecord\(row\)/.test(STORE) && /listRecords\(/.test(STORE), '缺少操作明细持久化');
+  assert.ok(/pruneFollowStats/.test(STORE), '缺少 bySource 清理');
+  assert.ok(/function localDate/.test(STORE), '未定义 localDate');
+  // bumpDaily 内不应再直接 flush（RB8）
+  const i = STORE.indexOf('bumpDaily(id, n)');
+  const seg = STORE.slice(i, STORE.indexOf('}', i) + 1);
+  assert.ok(seg && !/this\.flush\(\)/.test(seg), 'bumpDaily 仍即时 flush');
+});
+
+t('RB9 localDate 使用本地时区（凌晨不落到 UTC 前一天）', () => {
+  const { localDate } = require(path.join(__dirname, '..', 'src', 'store'));
+  const d = new Date(2026, 0, 2, 0, 30, 0);   // 本地 2026-01-02 00:30
+  assert.strictEqual(localDate(d), '2026-01-02', 'localDate 应返回本地日期');
+});
+
+t('RB3/RB8 store 记录进内存但不立即落盘，flush 后持久化', () => {
+  const { Store } = require(path.join(__dirname, '..', 'src', 'store'));
+  const os = require('os');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'brm-rec-'));
+  const s = new Store(tmp); s.load();
+  s.addRecord({ mid: 1, uname: 'a', result: '已关注' });
+  assert.strictEqual(s.listRecords().length, 1, 'addRecord 应立即进内存');
+  const file = path.join(tmp, 'data.json');
+  const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  assert.ok(before.indexOf('已关注') < 0, 'addRecord 不应立即落盘（RB8）');
+  assert.strictEqual(s.flush(), true, 'flush 应成功');
+  const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.strictEqual(disk.records.length, 1, 'flush 后记录应落盘（RB3）');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+(async () => {
+  // RB1/RB14：真实文件 SHA256 校验
+  try {
+    const core = require(path.join(__dirname, '..', 'src', 'updater-core'));
+    const os = require('os');
+    const crypto = require('crypto');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'brm-sha-'));
+    const f = path.join(tmp, 'x.bin');
+    fs.writeFileSync(f, 'hello-bili');
+    const expect = crypto.createHash('sha256').update('hello-bili').digest('hex');
+    const actual = await core.sha256File(f);
+    assert.strictEqual(actual, expect, 'sha256File 结果不正确');
+    const map = core.parseChecksums(expect + '  bili-relation-manager-test.exe');
+    assert.strictEqual(core.findHash(map, 'bili-relation-manager-test.exe'), expect, 'findHash 未命中');
+    console.log('  \u2713 RB1 sha256File / parseChecksums / findHash 真实文件校验');
+    pass++;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  } catch (e) {
+    console.log('  \u2717 RB1 sha256File 真实文件校验  →  ' + e.message);
+    fail++;
+  }
+  console.log(`\n────────────  通过 ${pass} · 失败 ${fail}  ────────────\n`);
+  process.exit(fail ? 1 : 0);
+})();

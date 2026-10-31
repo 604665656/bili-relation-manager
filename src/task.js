@@ -2,6 +2,7 @@
 /** 多账号并发任务引擎：每个账号一条独立异步流水线，互不阻塞 */
 const { EventEmitter } = require('events');
 const { BiliClient, sleep } = require('./bilibili');
+const { diffUnfollowers, localDate } = require('./store');
 
 const MUTUAL = 4;   // attribute 位：TA关注了我（回关）
 const FOLLOWED = 2; // attribute 位：我关注了TA
@@ -190,7 +191,7 @@ class Engine extends EventEmitter {
   _pushStats(id) {
     const a = this.store.getAccount(id);
     if (!a) return;
-    this.emit('stats', { accountId: id, followStats: a.followStats, live: a.live, daily: a.daily });
+    this.emit('stats', { accountId: id, followStats: a.followStats, live: a.live, daily: a.daily, unfollowers: a.unfollowers || [] });
   }
 
   /* ══════════ 主循环（含自动循环） ══════════ */
@@ -211,6 +212,17 @@ class Engine extends EventEmitter {
       this.emit('account', { id, state: 'running', stats: Object.assign({}, run0.stats) });
       try {
         while (true) {
+          // RB20：每日休息时段 / 每周休息日——命中则暂停到窗口结束（可取消）
+          const quiet = this._quietRemainMs();
+          if (quiet) {
+            const runW = this.runners.get(id);
+            runW.state = 'waiting';
+            this.emit('account', { id, state: 'waiting', stats: Object.assign({}, runW.stats) });
+            this._log(id, 'info', `${quiet.reason}：暂停运行，约 ${Math.ceil(quiet.ms / 60000)} 分钟后恢复`);
+            const okQ = await this._sleepCancelable(runW, id, quiet.ms);
+            if (!okQ || runW.cancel) break;
+            continue;
+          }
           round++;
           this._stat(id, { round, scanned: 0, dealt: 0, ok: 0, fail: 0 });
           await this._runRound(acc, this.runners.get(id), round);
@@ -422,6 +434,11 @@ class Engine extends EventEmitter {
       }
     }
 
+    // 取关我的名单：每日一次拉取粉丝快照并比对（独立于任务开关；仅读取+本地记录，不做 B站写操作）
+    if (cfg.trackUnfollowers !== false && !run.cancel) {
+      await this._phaseUnfollowers(acc, run, client);
+    }
+
     this._pushStats(id);
   }
 
@@ -440,6 +457,79 @@ class Engine extends EventEmitter {
     } catch (e) { /* 统计失败不影响主流程 */ }
   }
 
+  /* ══════════ 阶段：取关我的名单（每日一次，仅读取粉丝列表+本地记录，不对 B站 做写操作） ══════════ */
+  async _phaseUnfollowers(acc, run, client) {
+    const cfg = acc.cfg;
+    const id = acc.id;
+
+    // ── 每日节流：同一天只比对一次（除非还没建过基线）──
+    const a0 = this.store.getAccount(id);
+    const today = localDate();
+    const prevSnap = (a0 && a0.followerSnapshot) || [];
+    if (a0 && a0.lastFollowerSnapDate === today && prevSnap.length > 0) {
+      this._log(id, 'info', `取关名单：今日已比对过（基线 ${prevSnap.length} 人），跳过`);
+      return;
+    }
+
+    this._log(id, 'info', '取关名单：开始拉取粉丝列表快照（仅读取，不改动 B站 关系）…');
+
+    // 粉丝列表接口上限前 1000 条（pn ≤ 20，每页 50）
+    const MAX_PN = 20;
+    const list = [];
+    let pn = 1, total = Infinity;
+    while (pn <= MAX_PN && !run.cancel && (pn - 1) * 50 < total) {
+      const j = await client.followers(pn, 50, client.mid);
+      if (!j || j.code !== 0) {
+        const code = j && j.code;
+        const msg = (code === 22118) ? '对方隐藏了粉丝列表，无法比对取关名单' : (j && j.message);
+        this._log(id, 'error', `取关名单：粉丝列表拉取失败：${msg} (code=${code})`);
+        if (code === -352 || code === -509) { this._tripBreaker(id, code); return; }
+        if (code === -101 || code === 22118) return;
+        return;   // 其它错误：不更新基线，等下次重试
+      }
+      if (typeof j.data.total === 'number') { total = j.data.total; }
+      const items = (j.data && j.data.list) || [];
+      if (!items.length) break;
+      for (const it of items) list.push({ mid: String(it.mid), uname: it.uname || '' });
+      pn++;
+      if (pn <= MAX_PN) await sleep(this.store.get().global.pageGap || 1200);
+    }
+    if (run.cancel) return;
+
+    // 受 1000 条上限约束：超过部分无法覆盖，记录提示让用户知情
+    if (typeof total === 'number' && total > list.length) {
+      this._log(id, 'warn',
+        `取关名单：粉丝数 ${total} 超过接口上限 ${list.length}，仅能监控最近 ${list.length} 名粉丝的取关情况（取关名单功能硬约束）`);
+    }
+
+    // 首次 / 没基线：仅建立基线，不打扰用户
+    if (prevSnap.length === 0) {
+      this.store.setFollowerSnapshot(id, list);
+      this._log(id, 'info', `取关名单：已建立粉丝快照基线（${list.length} 人），后续每日自动比对取关者`);
+      return;
+    }
+
+    // 差集：上一次有、这一次没有的 UID = 取关者
+    const lost = diffUnfollowers(prevSnap, list);
+
+    if (lost.length === 0) {
+      this._log(id, 'info', `取关名单：本次比对无新增取关者（基线 ${prevSnap.length} 人）`);
+    } else {
+      // 批量写入取关名单 + 加入「不再回关」名单（按用户设定：自动加入）
+      const entries = lost.map((u) => ({ mid: u.mid, uname: u.uname }));
+      this.store.addUnfollowers(id, entries);
+      this.store.addNeverFollow(lost.map((u) => u.mid));
+      this._log(id, 'warn', `取关名单：发现 ${lost.length} 人取关了你，已记录并加入「不再回关」名单`);
+      for (const u of lost) {
+        this._push(id, { uname: u.uname, mid: u.mid, result: '取关我的', detail: '已加入不再回关名单' });
+      }
+    }
+
+    // 无论有无取关者，都更新快照基线，避免次日重复记录
+    this.store.setFollowerSnapshot(id, list);
+    this._pushStats(id);
+  }
+
   /* ══════════ 通用过滤 ══════════ */
   _skipReason(acc, it, cfg, client) {
     if (String(it.mid) === String(client.mid)) return '自己';
@@ -449,6 +539,8 @@ class Engine extends EventEmitter {
     if (cfg.skipOfficial && it.official_verify && it.official_verify.type > 0 && it.official_verify.desc) return '认证账号';
     // 「特别关注」字段：新接口为 special，旧接口为 special_attention
     if (cfg.skipSpecial && (it.special === 1 || it.special_attention === 1)) return '特别关注';
+    // RB12：可选跳过大会员（接口若返回 vip.vipStatus=1 才算，字段缺失时不误判）
+    if (cfg.skipVip && it.vip && Number(it.vip.vipStatus) === 1) return '大会员';
     return null;
   }
 
@@ -456,6 +548,29 @@ class Engine extends EventEmitter {
     const lo = Math.max(1000, Number(cfg.delayMin) || 3000);
     const hi = Math.max(lo, Number(cfg.delayMax) || 6000);
     return Math.floor(Math.random() * (hi - lo + 1)) + lo;
+  }
+
+  /** RB20：返回距离休息时段结束的毫秒数（不在休息时段返回 null） */
+  _quietRemainMs() {
+    const g = this.store.get().global || {};
+    const now = new Date();
+    const restDays = Array.isArray(g.restDays) ? g.restDays.map(Number) : [];
+    if (restDays.includes(now.getDay())) {
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      return { ms: Math.max(60000, next - now), reason: '每周休息日' };
+    }
+    const q = String(g.quietHours || '').trim();
+    const m = q.match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const sh = +m[1], sm = +m[2], eh = +m[3], em = +m[4];
+    const cur = now.getHours() * 60 + now.getMinutes();
+    const start = sh * 60 + sm, end = eh * 60 + em;
+    const inWin = start <= end ? (cur >= start && cur < end) : (cur >= start || cur < end);
+    if (!inWin) return null;
+    const endAt = new Date(now);
+    endAt.setHours(eh, em, 0, 0);
+    if (endAt <= now) endAt.setDate(endAt.getDate() + 1);
+    return { ms: Math.max(60000, endAt - now), reason: `休息时段 ${q}` };
   }
 
   /** 操作前检查每日上限；true 表示可以继续 */
@@ -886,8 +1001,11 @@ class Engine extends EventEmitter {
         s.bySource = s.bySource || {};
         if (!s.bySource[srcKey]) s.bySource[srcKey] = { tried: 0, back: 0, sample: 0, stopped: false };
         s.bySource[srcKey].tried++;
+        s.bySource[srcKey].at = Date.now();   // RB6：记录更新时间供清理
         s.pendingVerify = s.pendingVerify || [];
         s.pendingVerify.push({ fid: it.mid, uname: it.uname, source: srcKey, at: Date.now() });
+        // RB7：待核验队列硬上限，防极端情况下无限累积（丢弃最老的）
+        if (s.pendingVerify.length > 5000) s.pendingVerify.splice(0, s.pendingVerify.length - 5000);
       });
       this._log(acc.id, 'ok', `已关注 ${it.uname} (${it.mid})${srcText}`);
       this._push(acc.id, { uname: it.uname, mid: it.mid, result: doneText, detail: srcText.trim(), source });
@@ -900,8 +1018,10 @@ class Engine extends EventEmitter {
       run.stats.fail++;
       this._log(acc.id, 'error', `关注失败 ${it.uname}：${r.message}`);
       this._push(acc.id, { uname: it.uname, mid: it.mid, result: '失败', detail: r.message, source });
-      // 已注销 / 隐私限制：记入跨账号共享的「不可关注」名单，之后直接跳过，不再浪费请求
-      if (/账号已注销|注销|隐私设置/.test(String(r.message || ''))) {
+      // 已注销 / 隐私限制：优先按错误码判断，文案正则仅作收窄后的兜底（RB5）
+      const deadByCode = [22001, -404].includes(Number(r.code));
+      const deadByMsg = /账号已注销|已注销账号|隐私设置.{0,6}(不可|无法|限制)/.test(String(r.message || ''));
+      if (deadByCode || deadByMsg) {
         this.store.addDeadUser(it.mid, r.message);
         this._log(acc.id, 'info', `${it.uname} (${it.mid}) 已记入「不可关注」名单，后续全账号跳过`);
       }
@@ -944,6 +1064,7 @@ class Engine extends EventEmitter {
         const key = String(item.source);
         if (!s.bySource[key]) s.bySource[key] = { tried: 0, back: 0, sample: 0, stopped: false };
         s.bySource[key].sample++;
+        s.bySource[key].at = Date.now();   // RB6
         if (r) { s.backed = (s.backed || 0) + 1; s.bySource[key].back++; }
       });
       await sleep(700);
@@ -953,8 +1074,11 @@ class Engine extends EventEmitter {
     const retryIds = new Set(retry.map((x) => String(x.fid)));
     const doneIds = new Set(due.map((x) => String(x.fid)));
     this.store.withFollowStats(accId, (s) => {
+      const now = Date.now();
+      const MAX_AGE = 30 * 86400000;   // RB7：超过 30 天仍未核验成功的直接丢弃，防无限累积
       s.pendingVerify = (s.pendingVerify || [])
-        .filter((x) => !doneIds.has(String(x.fid)) || retryIds.has(String(x.fid)));
+        .filter((x) => !doneIds.has(String(x.fid)) || retryIds.has(String(x.fid)))
+        .filter((x) => !x.at || now - x.at < MAX_AGE);
     });
 
     // 评估各来源回关率

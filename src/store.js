@@ -4,6 +4,13 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+/** 本地时区日期 YYYY-MM-DD（RB9：统一日期口径，避免 UTC 与本地混用导致跨天错位 8 小时） */
+function localDate(d) {
+  const t = d ? new Date(d) : new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${t.getFullYear()}-${p2(t.getMonth() + 1)}-${p2(t.getDate())}`;
+}
+
 const DEFAULT_ACCOUNT_CFG = {
   mode: 'auto',          // 旧字段，仅用于兼容历史数据；实际行为由 tasks 决定
 
@@ -31,6 +38,7 @@ const DEFAULT_ACCOUNT_CFG = {
   dryRun: true,
   skipOfficial: true,
   skipSpecial: true,     // 跳过「特别关注」（接口字段名为 special）
+  skipVip: false,        // RB12：跳过大会员（vipStatus=1）的 UP
   enabled: true,
 
   // ── 自动循环 ──
@@ -53,7 +61,10 @@ const DEFAULT_ACCOUNT_CFG = {
   capGuardReserve: 100,  // 自救触发预留：距关注上限还剩多少名额时触发（0 = 只有满了才触发）
 
   // ── 指定 UP 的粉丝（sources.ups 打开时才需要）──
-  targetUps: ''          // 目标 UP 的 UID，逗号/空格分隔
+  targetUps: '',         // 目标 UP 的 UID，逗号/空格分隔
+
+  // ── 取关我的名单（unfollowers）──
+  trackUnfollowers: true // 每日拉取粉丝快照并比对，记录取关者并自动加入不再回关名单
 };
 
 /** 旧版本单选 mode → 新多选 tasks/sources 的迁移映射 */
@@ -95,19 +106,32 @@ const DEFAULT_GLOBAL = {
   statIntervalMin: 5,      // 关注/粉丝数实时刷新间隔(分钟)
   autoStartOnLaunch: false, // 应用启动时，自动恢复「有任务且未禁用」的账号（需用户主动开启）
   followCap: 5000,         // 关注上限保护：关注数达到该值就跳过「自动关注」，防止被 B 站拒绝（普通账号 5000，大会员可调高；0 = 关闭）
-  logKeepDays: 14          // 每日日志文件保留天数（logs/YYYY-MM-DD.log）
+  logKeepDays: 14,         // 每日日志文件保留天数（logs/YYYY-MM-DD.log）
+  quietHours: '',          // 每日休息时段（RB20）：如 "23:00-08:00"，空 = 不限制
+  restDays: []             // 每周休息日（RB20）：0=周日…6=周六，空 = 不限制
 };
 
 /** 界面日志保留条数（完整历史在 logs/ 目录的每日文件里） */
 const UI_LOG_CAP = 300;
 
 class Store {
-  constructor(dir) {
+  /**
+   * @param {string} dir 数据目录
+   * @param {{codec?: {encrypt:(s:string)=>string, decrypt:(s:string)=>string}}} [opts]
+   *   codec 用于 cookie 落盘加密（RB2）：main 进程传 safeStorage(DPAPI) 实现；
+   *   单测/无 electron 环境不传 → identity（明文），保持 store.js 可独立 require。
+   */
+  constructor(dir, opts = {}) {
     this.dir = dir;
     this.file = path.join(dir, 'data.json');
     this.data = null;
     this.lastError = null;
+    this.codec = opts.codec || null;
+    this._dirty = false;   // RB8：高频字段只标记脏，由主进程 3s 定时 flush
   }
+
+  /** 标记有变更待落盘（不立即写文件） */
+  _markDirty() { this._dirty = true; }
 
   ensure() {
     try { fs.mkdirSync(this.dir, { recursive: true }); } catch (e) { /* ignore */ }
@@ -128,11 +152,21 @@ class Store {
     if (!Array.isArray(g.neverFollow)) g.neverFollow = [];
     if (!Array.isArray(g.deadUsers)) g.deadUsers = [];
     if (!g.upHealth || typeof g.upHealth !== 'object' || Array.isArray(g.upHealth)) g.upHealth = {};
+    if (typeof g.quietHours !== 'string') g.quietHours = '';
+    if (!Array.isArray(g.restDays)) g.restDays = [];
     if (!Array.isArray(this.data.logs)) this.data.logs = [];
+    if (!Array.isArray(this.data.records)) this.data.records = [];
     this.data.accounts = (this.data.accounts || []).map((a) => this._normalize(a));
+    // RB2：cookie 解密（旧版明文无前缀，codec.decrypt 原样返回，天然兼容迁移）
+    if (this.codec) {
+      for (const a of this.data.accounts) {
+        try { a.cookie = this.codec.decrypt(a.cookie || ''); } catch (e) { a.cookie = a.cookie || ''; }
+      }
+    }
     this._deadSet = null;   // 懒加载索引
     this.pruneLogFiles();
     this.pruneUpHealth();
+    this.pruneFollowStats();
     return this.data;
   }
 
@@ -154,7 +188,12 @@ class Store {
       // 粉丝数按天快照：用于计算「今日/本周/本月/本年 新增粉丝」
       followerLog: (a.followerLog && typeof a.followerLog === 'object' && !Array.isArray(a.followerLog)) ? a.followerLog : {},
       // 「指定 UP」轮转游标：记住上轮扫到列表第几个，下轮从这里继续（避免只扫头部）
-      upCursor: Number(a.upCursor) || 0
+      upCursor: Number(a.upCursor) || 0,
+      // 粉丝 UID 快照（用于比对「取关我的名单」）：[{mid,uname}]，受 B站 API 前 1000 条上限约束
+      followerSnapshot: Array.isArray(a.followerSnapshot) ? a.followerSnapshot.slice(-2000) : [],
+      lastFollowerSnapDate: typeof a.lastFollowerSnapDate === 'string' ? a.lastFollowerSnapDate : '',
+      // 取关我的名单：{ date, mid, uname, handled: null|'auto'|'blocked'|'ignored' }
+      unfollowers: Array.isArray(a.unfollowers) ? a.unfollowers : []
     };
   }
 
@@ -167,9 +206,19 @@ class Store {
     try {
       this.ensure();
       const tmp = this.file + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
+      // RB2：落盘前对 cookie 加密（内存里保持明文供请求使用，磁盘只存密文）
+      let payload = this.data;
+      if (this.codec) {
+        payload = Object.assign({}, this.data, {
+          accounts: this.data.accounts.map((a) => Object.assign({}, a, {
+            cookie: this.codec.encrypt(a.cookie || '')
+          }))
+        });
+      }
+      fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
       fs.renameSync(tmp, this.file);
       this.lastError = null;
+      this._dirty = false;
       return true;
     } catch (e) {
       this.lastError = e && e.message || String(e);
@@ -256,6 +305,54 @@ class Store {
     this.get().global.neverFollow = [];
     this.flush();
     return [];
+  }
+
+  /* ══════ 取关我的名单（unfollowers） ══════ */
+  setFollowerSnapshot(id, list) {
+    const a = this.getAccount(id);
+    if (!a) return null;
+    a.followerSnapshot = Array.isArray(list)
+      ? list.map((x) => ({ mid: String(x.mid), uname: x.uname || '' })).slice(-2000)
+      : [];
+    a.lastFollowerSnapDate = localDate();
+    this.flush();
+    return a.followerSnapshot;
+  }
+  addUnfollower(id, entry) {
+    const a = this.getAccount(id);
+    if (!a) return null;
+    a.unfollowers = a.unfollowers || [];
+    a.unfollowers.unshift(Object.assign({ date: localDate(), handled: 'auto' }, entry));
+    if (a.unfollowers.length > 5000) a.unfollowers.length = 5000;
+    this.flush();
+    return a.unfollowers;
+  }
+  /** 批量写入取关者（一次落盘，避免逐条重写整个 data.json） */
+  addUnfollowers(id, entries) {
+    const a = this.getAccount(id);
+    if (!a) return null;
+    const today = localDate();
+    a.unfollowers = a.unfollowers || [];
+    const items = (Array.isArray(entries) ? entries : [entries]).map((e) =>
+      Object.assign({ date: today, handled: 'auto' }, e));
+    a.unfollowers = items.concat(a.unfollowers);
+    if (a.unfollowers.length > 5000) a.unfollowers.length = 5000;
+    this.flush();
+    return a.unfollowers;
+  }
+  markUnfollower(id, mid, status) {
+    const a = this.getAccount(id);
+    if (!a) return null;
+    const item = (a.unfollowers || []).find((u) => String(u.mid) === String(mid));
+    if (!item) return null;
+    item.handled = status; // 'blocked' | 'ignored'
+    if (status === 'blocked') this.addNeverFollow(mid);
+    this.flush();
+    return a.unfollowers;
+  }
+  listUnfollowers(id) {
+    const a = this.getAccount(id);
+    return a ? (a.unfollowers || []) : [];
   }
 
   /* ══════ 不可关注用户（已注销 / 隐私限制），跨账号共享 ══════ */
@@ -357,18 +454,18 @@ class Store {
     const a = this.getAccount(id);
     if (!a) return null;
     Object.assign(a, patch || {});
-    this.flush();
+    this._markDirty();
     return a;
   }
 
-  /** 每日计数：跨天自动重置，返回累加后的当日总量 */
+  /** 每日计数：跨天自动重置，返回累加后的当日总量（RB9 用本地日期；RB8 不即时 flush） */
   bumpDaily(id, n) {
     const a = this.getAccount(id);
     if (!a) return 0;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDate();
     if (a.daily.date !== today) { a.daily.date = today; a.daily.ops = 0; }
     a.daily.ops += (n || 0);
-    this.flush();
+    this._markDirty();
     return a.daily.ops;
   }
 
@@ -383,25 +480,25 @@ class Store {
       follower: follower == null ? a.live.follower : follower,
       prevFollowing: dF, prevFollower: dR, at: Date.now()
     };
-    // 记录每日粉丝快照（用于「新增粉丝」周期统计），保留最近 400 天
+    // 记录每日粉丝快照（用于「新增粉丝」周期统计），保留最近 400 天（RB9 本地日期）
     if (follower != null) {
-      const day = new Date().toISOString().slice(0, 10);
+      const day = localDate();
       a.followerLog = a.followerLog || {};
       a.followerLog[day] = follower;
       const keys = Object.keys(a.followerLog).sort();
       if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete a.followerLog[k];
     }
-    this.flush();
+    this._markDirty();
     return { following: a.live.following, follower: a.live.follower, dFollowing: dF, dFollower: dR };
   }
 
-  /** 回关率统计：修改 followStats（mutator 直接操作对象） */
+  /** 回关率统计：修改 followStats（mutator 直接操作对象；RB8 不即时 flush） */
   withFollowStats(id, mutator) {
     const a = this.getAccount(id);
     if (!a) return null;
     if (!a.followStats) a.followStats = { tried: 0, backed: 0, sample: 0, bySource: {}, pendingVerify: [] };
     mutator(a.followStats);
-    this.flush();
+    this._markDirty();
     return a.followStats;
   }
 
@@ -411,6 +508,44 @@ class Store {
     a.followStats = { tried: 0, backed: 0, sample: 0, bySource: {}, pendingVerify: [] };
     this.flush();
     return a.followStats;
+  }
+
+  /**
+   * RB6：清理长期未更新的回关率来源（bySource 随关键词/UP 数线性膨胀）。
+   * 仅删除「带 at 时间戳且超过 N 天」的条目；旧数据无 at 时保留，避免误删历史。
+   * 并限制来源总数（按 at 最旧优先丢弃）。
+   */
+  pruneFollowStats(days = 30, maxKeys = 500) {
+    const cutoff = Date.now() - days * 86400000;
+    for (const a of this.get().accounts) {
+      const by = a && a.followStats && a.followStats.bySource;
+      if (!by || typeof by !== 'object') continue;
+      for (const k of Object.keys(by)) {
+        const b = by[k];
+        const t = Number(b && b.at) || 0;
+        if (t && t < cutoff) delete by[k];
+      }
+      const keys = Object.keys(by);
+      if (keys.length > maxKeys) {
+        keys.sort((x, y) => (Number(by[x].at) || 0) - (Number(by[y].at) || 0));
+        for (const k of keys.slice(0, keys.length - maxKeys)) delete by[k];
+      }
+    }
+  }
+
+  /* ══════ 操作明细（RB3：落盘持久化，重启不丢） ══════ */
+  addRecord(row) {
+    const d = this.get();
+    if (!Array.isArray(d.records)) d.records = [];
+    d.records.push(Object.assign({ ts: Date.now() }, row));
+    if (d.records.length > 3000) d.records.splice(0, d.records.length - 3000);
+    this._markDirty();   // 高频写入，交给主进程定时 flush
+    return d.records;
+  }
+  listRecords(n = 3000) {
+    const d = this.get();
+    const list = Array.isArray(d.records) ? d.records : [];
+    return n > 0 ? list.slice(-n) : list;
   }
 
   /** 高频写入，不落盘；由主进程定时 flush，避免每条日志重写整个文件 */
@@ -425,4 +560,20 @@ class Store {
   }
 }
 
-module.exports = { Store, DEFAULT_ACCOUNT_CFG, DEFAULT_GLOBAL, normalizeCfg, MODE_TO_TASKS };
+module.exports = { Store, DEFAULT_ACCOUNT_CFG, DEFAULT_GLOBAL, normalizeCfg, MODE_TO_TASKS, diffUnfollowers, localDate };
+
+/**
+ * 计算「取关者」：prev 里有、curr 里没有的 UID（保留昵称）。
+ * 纯函数，便于单测，也供 task.js 的 _phaseUnfollowers 直接复用。
+ * @param {Array<{mid:string|number,uname?:string}>} prev 上一次粉丝快照
+ * @param {Array<{mid:string|number,uname?:string}>} curr 本次粉丝快照
+ * @returns {Array<{mid:string,uname:string}>} 取关者（mid 归一为字符串）
+ */
+function diffUnfollowers(prev, curr) {
+  const prevMap = {};
+  (Array.isArray(prev) ? prev : []).forEach((x) => { if (x && x.mid != null) prevMap[String(x.mid)] = x; });
+  const currSet = new Set((Array.isArray(curr) ? curr : []).map((x) => String(x && x.mid)));
+  const lost = [];
+  for (const mid of Object.keys(prevMap)) if (!currSet.has(mid)) lost.push({ mid: String(prevMap[mid].mid), uname: prevMap[mid].uname || '' });
+  return lost;
+}

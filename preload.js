@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld('api', {
 
   exportCsv: () => invoke('app:exportCsv'),
 
+  unfollowerList: (id) => invoke('unfollower:list', { id: String(id || '') }),
+  unfollowerMark: (id, mid, status) => invoke('unfollower:mark', { id: String(id || ''), mid: String(mid || ''), status: status === 'ignored' ? 'ignored' : 'blocked' }),
+  unfollowerExport: (id) => invoke('unfollower:export', { id: String(id || '') }),
+
   updaterCheck: () => invoke('updater:check'),
   updaterInfo: () => invoke('updater:info'),
   updaterApply: () => invoke('updater:apply'),

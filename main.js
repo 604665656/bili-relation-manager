@@ -1,6 +1,6 @@
 'use strict';
 /** Electron 主进程 */
-const { app, BrowserWindow, ipcMain, session, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, shell, Menu, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -11,7 +11,7 @@ const { Updater } = require('./src/updater');
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-10-31 14:50 新增粉丝统计(本/周/月/年)+操作明细与统计时间戳';
+const BUILD_TAG = '2026-11-01 审计修复：更新SHA256校验/断点续传·Cookie加密·明细落盘·本地日期·CSV注入防护·单实例锁等';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -25,6 +25,20 @@ let checkInFlight = null;
 app.disableHardwareAcceleration();
 app.setAppUserModelId && app.setAppUserModelId('com.local.bili.relation.manager');
 
+/* RB11：单实例锁——防止「安装版 + 旧便携版」两个进程同时全量写同一 data.json（最后写者胜、丢更新）。
+   拿不到锁说明已有实例在跑，直接退出并聚焦已有窗口。 */
+let hasSingleLock = true;
+try { hasSingleLock = app.requestSingleInstanceLock(); } catch (e) { hasSingleLock = true; }
+if (!hasSingleLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      try { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } catch (e) { /* ignore */ }
+    }
+  });
+}
+
 /* GPU 进程在部分机器上会 FATAL 退出并带走整个应用（表现为「点登录没反应」），
    这里显式关闭 GPU 相关子系统；不要加 in-process-gpu，实测会导致加载页面卡死 */
 app.commandLine.appendSwitch('disable-gpu');
@@ -37,8 +51,34 @@ app.on('child-process-gone', (_e, details) => {
 });
 
 /* ══════════════ 初始化 ══════════════ */
+/**
+ * RB2：cookie 落盘加密（Windows DPAPI 经 Electron safeStorage）。
+ * 内存中始终明文供请求使用，flush 时加密、load 时解密；旧版明文无前缀 → 原样返回，平滑迁移。
+ */
+const COOKIE_PREFIX = 'enc1:';
+function makeCookieCodec() {
+  return {
+    encrypt(plain) {
+      const s = String(plain || '');
+      if (!s) return s;
+      try {
+        if (safeStorage && safeStorage.isEncryptionAvailable()) {
+          return COOKIE_PREFIX + safeStorage.encryptString(s).toString('base64');
+        }
+      } catch (e) { /* 降级明文 */ }
+      return s;
+    },
+    decrypt(stored) {
+      const s = String(stored || '');
+      if (!s.startsWith(COOKIE_PREFIX)) return s;
+      try { return safeStorage.decryptString(Buffer.from(s.slice(COOKIE_PREFIX.length), 'base64')); }
+      catch (e) { return ''; }
+    }
+  };
+}
+
 function init() {
-  store = new Store(app.getPath('userData'));
+  store = new Store(app.getPath('userData'), { codec: makeCookieCodec() });
   store.load();
   engine = new Engine(store);
 
@@ -221,6 +261,9 @@ function openLoginWindow() {
     clearInterval(loginCtx && loginCtx.timer);
     loginWindow = null;
     done({ ok: false, reason: 'closed' });
+    // RB4：清理本次登录用的临时 partition 存储，避免每次扫码累积磁盘占用
+    try { ses.clearStorageData().catch(() => {}); } catch (e) { /* ignore */ }
+    try { ses.clearCache().catch(() => {}); } catch (e) { /* ignore */ }
   });
 
   loginWindow.loadURL('https://passport.bilibili.com/login');
@@ -262,7 +305,8 @@ function publicAccount(a) {
     id: a.id, uid: a.uid, uname: a.uname, face: a.face,
     cfg: a.cfg, state: engine ? engine.stateOf(a.id).state : 'idle',
     stats: engine ? engine.stateOf(a.id).stats : null,
-    live: a.live, followStats: a.followStats, daily: a.daily, followerLog: a.followerLog || {}
+    live: a.live, followStats: a.followStats, daily: a.daily, followerLog: a.followerLog || {},
+    unfollowers: a.unfollowers || []
   };
 }
 
@@ -289,6 +333,7 @@ function registerIPC() {
     accounts: store.listAccounts().map(publicAccount),
     global: store.get().global,
     logs: store.get().logs.slice(-200),
+    records: store.listRecords(500),   // RB3：重启后界面仍能看到历史明细
     busy: engine.isBusy(),
     writable: store.checkWritable(),
     storeError: store.lastError,
@@ -399,6 +444,17 @@ function registerIPC() {
     return { neverFollow: store.addNeverFollow(list) };
   }));
 
+  /* ── 取关我的名单 ── */
+  ipcMain.handle('unfollower:list', safe('unfollower:list', (p) => ({
+    list: store.listUnfollowers(String((p && p.id) || ''))
+  })));
+  ipcMain.handle('unfollower:mark', safe('unfollower:mark', (p) => {
+    const status = (p && p.status) === 'ignored' ? 'ignored' : 'blocked';
+    const r = store.markUnfollower(String((p && p.id) || ''), String((p && p.mid) || ''), status);
+    return { ok: !!r, neverFollow: store.get().global.neverFollow };
+  }));
+  ipcMain.handle('unfollower:export', safe('unfollower:export', (p) => exportUnfollowersCsv((p && p.id) || '')));
+
   /* ── 统计 ── */
   ipcMain.handle('app:refreshStats', safe('app:refreshStats', async () => {
     await refreshLiveStats();
@@ -472,6 +528,36 @@ function runUpdateCheck(opts = {}) {
   return checkInFlight;
 }
 
+/** 导出「取关我的名单」（按账号） */
+async function exportUnfollowersCsv(id) {
+  const win = mainWindow;
+  if (!win) return { ok: false };
+  const acc = store.getAccount(String(id));
+  if (!acc) return { ok: false, error: '账号不存在' };
+  const list = store.listUnfollowers(String(id));
+  const res = await dialog.showSaveDialog(win, {
+    title: '导出取关我的名单',
+    defaultPath: path.join(app.getPath('downloads'), `bili_unfollowers_${acc.uname || acc.uid}_${Date.now()}.csv`),
+    filters: [{ name: 'CSV', extensions: ['csv'] }]
+  });
+  if (res.canceled || !res.filePath) return { ok: false };
+  try {
+    // RB18：复用 escapeCell（引号转义 + 包裹 + 公式前缀防护），与操作记录 CSV 一致
+    const header = ['日期', 'UID', '昵称', '处理状态'].map(escapeCell).join(',');
+    const lines = list.map((u) => {
+      const h = u.handled === 'blocked' ? '已拉黑' : u.handled === 'ignored' ? '已忽略'
+        : u.handled === 'auto' ? '自动记录' : '未处理';
+      return [u.date || '', u.mid || '', u.uname || '', h].map(escapeCell).join(',');
+    }).join('\r\n');
+    fs.writeFileSync(res.filePath, '﻿' + header + '\r\n' + lines, 'utf8'); // BOM 让 Excel 正确识别 UTF-8
+    sendLog('ok', `已导出 ${list.length} 条取关记录 → ${res.filePath}`);
+    return { ok: true, path: res.filePath, rows: list.length };
+  } catch (e) {
+    sendLog('error', '导出失败：' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 /** 导出操作记录（IPC 与菜单共用） */
 async function exportCsvNow() {
   const win = mainWindow;
@@ -485,8 +571,9 @@ async function exportCsvNow() {
   try {
     const csv = buildCsv();
     fs.writeFileSync(res.filePath, csv, 'utf8');
-    sendLog('ok', `已导出 ${engineRecords.length} 条操作记录 → ${res.filePath}`);
-    return { ok: true, path: res.filePath, rows: engineRecords.length };
+    const n = store.listRecords(3000).length;
+    sendLog('ok', `已导出 ${n} 条操作记录 → ${res.filePath}`);
+    return { ok: true, path: res.filePath, rows: n };
   } catch (e) {
     sendLog('error', '导出失败：' + e.message);
     return { ok: false, error: e.message };
@@ -585,10 +672,16 @@ function showAboutDialog() {
   });
 }
 
-function escapeCell(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }
+function escapeCell(v) {
+  let s = String(v == null ? '' : v);
+  // RB15：防 CSV 公式注入——以 = + - @ 或 tab/CR 开头的单元格前置单引号，避免被表格软件当公式执行
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
 function buildCsv() {
   const lines = [['时间', '账号', '昵称', 'UID', '结果', '说明', '来源'].map(escapeCell).join(',')];
-  for (const row of engineRecords) {
+  // RB3：导出基于落盘的操作明细（重启后仍可导出历史），而非进程内存
+  for (const row of store.listRecords(3000)) {
     lines.push([
       new Date(row.ts).toLocaleString('zh-CN'),
       row.accountName, row.uname, row.mid, row.result, row.detail,
@@ -614,19 +707,17 @@ function buildCsv() {
   return '\uFEFF' + lines.join('\r\n');
 }
 
-// 记录由 engine 事件累积，供导出使用
-const engineRecords = [];
-const MAX_RECORDS = 5000;
+// 记录由 engine 事件累积到 store（RB3：落盘持久化，重启不丢；由 3s 定时 flush）
 function hookRecords() {
   engine.on('record', (row) => {
     const acc = store.getAccount(row.accountId);
-    engineRecords.push(Object.assign({}, row, { accountName: acc ? acc.uname : '' }));
-    if (engineRecords.length > MAX_RECORDS) engineRecords.splice(0, engineRecords.length - MAX_RECORDS);
+    store.addRecord(Object.assign({}, row, { accountName: acc ? acc.uname : '' }));
   });
 }
 
 /* ══════════════ 生命周期 ══════════════ */
 app.whenReady().then(async () => {
+  if (!hasSingleLock) return;   // 已有实例在运行，本实例退出
   init();
   registerIPC();
   hookRecords();
@@ -649,6 +740,8 @@ app.whenReady().then(async () => {
       const core = require('./src/updater-core');
       if (core.compareVer('2.1.6', '2.1.7') >= 0) throw new Error('版本比较逻辑异常');
       if (!core.pickAsset([{ name: 'x-便携版.exe', size: 1 }])) throw new Error('资产挑选逻辑异常');
+      if (typeof core.sha256File !== 'function') throw new Error('缺少 SHA256 校验函数（RB1）');
+      if (!core.parseChecksums('a'.repeat(64) + '  x.exe').x.exe) throw new Error('校验文件解析异常');
     });
     check('renderer资源', () => {
       fs.accessSync(path.join(__dirname, 'renderer', 'index.html'));
@@ -713,6 +806,20 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+/* RB19：主进程未捕获异常不能只 console——写按天日志 + 通知界面 + 尽量落盘，否则用户无感且难排查 */
 process.on('uncaughtException', (e) => {
   console.error('[uncaught]', e);
+  try {
+    const msg = (e && (e.stack || e.message)) || String(e);
+    if (store) { store.addLog({ level: 'error', msg: '主进程未捕获异常：' + msg }); store.flush(); }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('bus:log', { accountId: '', level: 'error', msg: '主进程未捕获异常：' + ((e && e.message) || e), ts: Date.now() });
+    }
+  } catch (e2) { /* ignore */ }
+});
+process.on('unhandledRejection', (reason) => {
+  try {
+    const msg = (reason && (reason.stack || reason.message)) || String(reason);
+    if (store) store.addLog({ level: 'error', msg: '未处理的 Promise 拒绝：' + msg });
+  } catch (e) { /* ignore */ }
 });

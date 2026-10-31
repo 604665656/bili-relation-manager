@@ -194,6 +194,26 @@ textarea { width: 100%; resize: vertical; font-family: inherit; line-height: 1.6
 .res-pending { color: var(--yellow); }
 .res-skip { color: var(--muted); }
 
+/* ── 取关我的名单 ── */
+.pane-toolbar {
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border-bottom: 1px solid var(--line); background: #131a26; flex-wrap: wrap;
+}
+.pane-toolbar .muted { font-size: 11px; line-height: 1.4; }
+#unfollowerbox th:nth-child(1) { width: 16%; }
+#unfollowerbox th:nth-child(2) { width: 22%; }
+#unfollowerbox th:nth-child(3) { width: 18%; }
+#unfollowerbox th:nth-child(4) { width: 14%; }
+#unfollowerbox th:nth-child(5) { width: 30%; }
+.mini {
+  border: 1px solid var(--line); background: #1c2533; color: var(--txt);
+  border-radius: 5px; padding: 2px 8px; font-size: 11.5px; cursor: pointer; margin-right: 5px;
+}
+.mini:hover { border-color: var(--pink); }
+.mini.danger { color: #ff8a8a; }
+.mini.danger:hover { background: #3a1f24; }
+.ub-ops { white-space: nowrap; }
+
 /* ── 状态栏 ── */
 .statusbar {
   height: 28px; display: flex; align-items: center; padding: 0 14px; gap: 12px;

@@ -61,20 +61,33 @@ class Updater {
     });
   }
 
-  /** 流式下载（GitHub 资产会 302 跳转，Electron net 自动跟随） */
-  _download(url, dest, onProgress) {
+  /** 流式下载（GitHub 资产会 302 跳转，Electron net 自动跟随）；支持断点续传（RB13） */
+  _download(url, dest, onProgress, opts = {}) {
     return new Promise((resolve, reject) => {
       let settled = false;
       const done = (fn, arg) => { if (settled) return; settled = true; fn(arg); };
+      let start = 0;
+      if (opts.resume) {
+        try { const st = fs.statSync(dest); if (st.size > 0) start = st.size; } catch (e) { /* 无旧文件 */ }
+      }
       const req = net.request({ url, method: 'GET' });
       req.setHeader('User-Agent', UA);
+      if (start > 0) req.setHeader('Range', `bytes=${start}-`);
       req.on('response', (res) => {
+        if (res.statusCode === 416) {
+          // 断点文件与服务器不一致：清掉临时文件，让用户重试一次全量下载
+          try { fs.unlinkSync(dest); } catch (e) { /* ignore */ }
+          return done(reject, new Error('断点续传区间失效，已清理临时文件，请重试'));
+        }
         if (res.statusCode >= 400) {
           return done(reject, new Error(`下载失败（HTTP ${res.statusCode}）`));
         }
-        const total = Number(res.headers['content-length'] || 0) || null;
-        let received = 0;
-        const ws = fs.createWriteStream(dest);
+        const appending = start > 0 && res.statusCode === 206;
+        if (start > 0 && res.statusCode === 200) start = 0;   // 服务器不支持 Range，从头下
+        const len = Number(res.headers['content-length'] || 0) || 0;
+        const total = (len + (appending ? start : 0)) || null;
+        let received = appending ? start : 0;
+        const ws = fs.createWriteStream(dest, appending ? { flags: 'a' } : {});
         res.on('data', (chunk) => {
           received += chunk.length;
           if (onProgress) {
@@ -113,12 +126,15 @@ class Updater {
     if (!asset) {
       return { hasUpdate: false, error: `最新版 v${latestTxt} 尚未附带可下载的 EXE，请稍后再试或到项目主页手动下载` };
     }
+    // RB1：发布侧若附带 sha256sums.txt，则下载前先取期望哈希，用于下载后完整性校验
+    const cs = (json.assets || []).find((a) => /^sha256sums\.txt$/i.test(a && a.name || ''));
     return {
       hasUpdate: true,
       version: latestTxt,
       current: currentTxt,
       notes: String(json.body || '').slice(0, 4000),
       asset: { name: asset.name, url: asset.browser_download_url, size: Number(asset.size) || 0 },
+      checksums: cs ? { name: cs.name, url: cs.browser_download_url } : null,
       pageUrl: json.html_url || `https://github.com/${REPO}/releases`
     };
   }
@@ -138,12 +154,34 @@ class Updater {
         return { ok: false, error: msg };
       }
       const dest = path.join(os.tmpdir(), `brm-update-${info.version}.exe`);
+      // RB1：先取发布侧 sha256sums.txt 的期望哈希（取不到则退化为仅体积校验）
+      let expected = '';
+      if (info.checksums && info.checksums.url) {
+        try {
+          const cs = await this._request(info.checksums.url, { timeout: 20000 });
+          if (cs.status === 200) {
+            expected = core.findHash(core.parseChecksums(cs.body.toString('utf8')), info.asset.name);
+          }
+        } catch (e) { /* 校验文件取不到，不阻断下载，稍后提示 */ }
+      }
       const sizeMb = info.asset.size ? (info.asset.size / 1048576).toFixed(1) + ' MB' : '未知大小';
       this._emit('status', { msg: `正在下载 ${info.asset.name}（${sizeMb}）…` });
-      const r = await this._download(info.asset.url, dest, (p) => this._emit('progress', p));
+      // RB13：支持断点续传（临时文件已存在则从断点继续）
+      const r = await this._download(info.asset.url, dest, (p) => this._emit('progress', p), { resume: true });
       if (r.size < 1024 * 1024) {
         try { fs.unlinkSync(dest); } catch (e) { /* ignore */ }
         throw new Error('下载的文件异常（体积过小），已中止更新');
+      }
+      // RB1：SHA256 校验，不匹配立即中止并删除，绝不替换
+      if (expected) {
+        const actual = await core.sha256File(dest);
+        if (actual !== expected) {
+          try { fs.unlinkSync(dest); } catch (e) { /* ignore */ }
+          throw new Error(`更新包校验失败（SHA256 不匹配，已中止）。期望 ${expected.slice(0, 12)}…，实际 ${actual.slice(0, 12)}…`);
+        }
+        this._emit('status', { msg: '完整性校验通过（SHA256 一致）' });
+      } else {
+        this._emit('status', { msg: '⚠ 发布未附带 SHA256 校验文件，本次仅校验体积' });
       }
       this._emit('status', { msg: '下载完成，正在替换并重启…' });
       this._applySwap(dest);

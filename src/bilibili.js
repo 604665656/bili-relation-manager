@@ -10,8 +10,20 @@
  */
 const crypto = require('crypto');
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+/* RB21：多账号并发时若共用同一 UA，极端场景可能被关联风控。
+   这里准备一组真实存在的 Windows Chrome UA，按账号 UID 稳定选取（同账号始终同一 UA，
+   不同账号分散到不同版本），避免伪造随机 token 反而更可疑。 */
+const UA_POOL = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+];
+const UA = UA_POOL[0];
+function pickUA(uid) {
+  const n = Math.abs(Number(uid) || 0);
+  return UA_POOL[n % UA_POOL.length] || UA;
+}
 
 const MIXIN_KEY_ENC_TAB = [
   46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
@@ -73,6 +85,7 @@ class BiliClient {
     this._cm = parseCookieMap(this.cookie);
     this._wbi = null;
     this.mid = Number(this._cm.DedeUserID || 0);
+    this.ua = pickUA(this.mid);   // RB21：按账号稳定选择 UA
     this.profile = null;
   }
 
@@ -113,7 +126,7 @@ class BiliClient {
     }
 
     const headers = {
-      'User-Agent': UA,
+      'User-Agent': this.ua || UA,
       Accept: 'application/json, text/plain, */*',
       Referer: referer || 'https://space.bilibili.com/',
       Origin: 'https://space.bilibili.com'

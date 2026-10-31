@@ -48,4 +48,37 @@ function pickAsset(assets) {
   return exes.slice().sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0))[0];
 }
 
-module.exports = { parseVer, compareVer, fmt, pickAsset };
+/* ── RB1/RB13：SHA256 完整性校验 ── */
+const crypto = require('crypto');
+const fs = require('fs');
+
+/** 计算文件 SHA256（小写 hex） */
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash('sha256');
+    const rs = fs.createReadStream(file);
+    rs.on('data', (c) => h.update(c));
+    rs.on('error', reject);
+    rs.on('end', () => resolve(h.digest('hex')));
+  });
+}
+
+/** 解析 sha256sums.txt（`<64hex>  <name>` / `<64hex> *<name>`）→ { name: hash } */
+function parseChecksums(text) {
+  const map = {};
+  String(text || '').split(/\r?\n/).forEach((line) => {
+    const m = line.trim().match(/^([a-fA-F0-9]{64})\s+\*?(.+)$/);
+    if (m) map[m[2].trim()] = m[1].toLowerCase();
+  });
+  return map;
+}
+
+/** 按文件名（兼容路径前缀）查哈希 */
+function findHash(map, name) {
+  if (!map || !name) return '';
+  if (map[name]) return map[name];
+  const base = String(name).split(/[\\/]/).pop();
+  return map[base] || '';
+}
+
+module.exports = { parseVer, compareVer, fmt, pickAsset, sha256File, parseChecksums, findHash };

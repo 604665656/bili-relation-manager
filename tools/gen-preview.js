@@ -19,7 +19,7 @@ const baseCfg = {
   searchKeywords: '手绘 板绘 互粉',
   searchMaxPages: 2, searchMaxFans: 5000, searchMinLevel: 1,
   delayMin: 3000, delayMax: 6000, maxOps: 30,
-  dryRun: true, skipOfficial: true, skipSpecial: true,
+  dryRun: true, skipOfficial: true, skipSpecial: true, skipVip: false,
   autoLoop: true, loopIntervalMin: 30, dailyCap: 80, errRetryMin: 5, watchdogStallMin: 15,
   onlyAfterDays: true, minFollowDays: 7, targetUps: ''
 };
@@ -45,7 +45,13 @@ const ACC = {
     pendingVerify: [{ fid: 1 }, { fid: 2 }, { fid: 3 }]
   },
   daily: { date: '2026-10-21', ops: 23 },
-  stats: { scanned: 96, dealt: 23, ok: 21, fail: 2, round: 1, phase: '关键词搜索' }
+  stats: { scanned: 96, dealt: 23, ok: 21, fail: 2, round: 1, phase: '关键词搜索' },
+  followerSnapshot: [{ mid: '601', uname: '路过的粉丝A' }, { mid: '602', uname: '路过的粉丝B' }],
+  lastFollowerSnapDate: '2026-10-20',
+  unfollowers: [
+    { date: '2026-10-21', mid: '602', uname: '路过的粉丝B', handled: 'auto' },
+    { date: '2026-10-19', mid: '607', uname: '互动过一次的C', handled: 'ignored' }
+  ]
 };
 const ACC2 = Object.assign({}, ACC, {
   id: 'acc-2', uid: 99887766, uname: '许许许许许丶若辰', state: 'waiting',
@@ -58,7 +64,7 @@ const STATE = {
   global: {
     whiteList: ['10003', '10004'], neverFollow: ['501', '502', '503', '504'],
     rateThreshold: 0.15, rateMinSample: 20, rateVerifyGapHours: 24, pageGap: 1200, statIntervalMin: 5,
-    autoStartOnLaunch: true
+    autoStartOnLaunch: true, followCap: 5000, quietHours: '23:00-08:00', restDays: [0]
   },
   logs: [
     ['info', 'acc-1', '第 1 轮开始｜清理单向关注 + 自动关注目标（我的粉丝 / 关键词搜索）｜延迟 3000~6000ms｜上限 30｜【演练模式】'],
@@ -71,7 +77,7 @@ const STATE = {
     ['ok', 'acc-1', '已关注 高漫手绘板 (401739957) 来源：搜索「手绘」'],
     ['info', 'acc-2', '第 2 轮结束，30 分钟后开始第 3 轮']
   ].map(([level, accountId, msg], i) => ({ level, accountId, msg, ts: Date.now() - (9 - i) * 50000 })),
-  version: '2.1.12', build: '2026-10-31 14:50 新增粉丝统计(本/周/月/年)+操作明细与统计时间戳',
+  version: '2.1.14', build: '2026-11-01 审计修复：更新SHA256校验/断点续传·Cookie加密·明细落盘·本地日期·CSV注入防护·单实例锁等',
   writable: { ok: true, dir: 'C:\\Users\\x\\AppData\\Roaming\\bili-relation-manager' }
 };
 

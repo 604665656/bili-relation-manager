@@ -12,6 +12,12 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const crypto = require('crypto');
+
+/** 计算文件 SHA256（RB1：发布侧产出校验文件） */
+function sha256(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
 
 const REPO = '604665656/bili-relation-manager';
 const TOKEN = process.env.GH_TOKEN;
@@ -108,10 +114,19 @@ function upload(filePath, name, releaseId) {
     console.log('  删除旧资产 [' + a.name + '] → HTTP ' + d.status);
   }
 
-  // 3. 上传新资产
+  // 3. 上传新资产（先算 SHA256，再逐项上传）
+  const sums = [];
   for (const f of FILES) {
     const p = path.join(DIST, f.local);
     if (!fs.existsSync(p)) { console.error('文件不存在: ' + p + '（先 npm run build）'); process.exit(1); }
+    sums.push(sha256(p) + '  ' + f.remote);
+  }
+  const sumsPath = path.join(DIST, 'sha256sums.txt');
+  fs.writeFileSync(sumsPath, sums.join('\n') + '\n', 'utf8');
+  console.log('已生成 sha256sums.txt');
+
+  for (const f of FILES) {
+    const p = path.join(DIST, f.local);
     const r = await upload(p, f.remote, releaseId);
     if (r.json && r.json.id) {
       console.log('✓ 上传 [' + r.json.name + '] ' + Math.round(r.json.size / 1048576) + 'MB');
@@ -120,5 +135,9 @@ function upload(filePath, name, releaseId) {
       process.exit(1);
     }
   }
+  // 上传校验文件（updater 靠它做 SHA256 校验，RB1）
+  const cr = await upload(sumsPath, 'sha256sums.txt', releaseId);
+  if (cr.json && cr.json.id) console.log('✓ 上传 [sha256sums.txt]');
+  else console.error('⚠ sha256sums.txt 上传失败 HTTP ' + cr.status);
   console.log('DONE → https://github.com/' + REPO + '/releases/tag/' + TAG);
 })().catch((e) => { console.error(e); process.exit(1); });
