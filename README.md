@@ -54,6 +54,14 @@
 26. **新增粉丝统计（今日 / 本周 / 本月 / 本年）** — 卡片「今日操作」下方新增「新增粉丝」一行：今日/本周/本月/本年净增粉丝数（绿涨红跌），基于每日粉丝快照 `followerLog`（自动留存 400 天）计算，重启不丢、跨天累计。顺带解释「今日 N」= 今日操作总数（关注+取关+回粉），并非涨粉数
 27. **操作明细与统计补时间戳** — 用户反馈「日志有时间戳、明细和统计没有」：「操作明细」表新增「时间」列（与日志一致的 `HH:MM:SS`）；「统计」每个账号卡片头部新增「更新于 HH:MM:SS」（取自每次刷新实时数时写入的 `live.at`）。CSV 导出本就含完整日期时间
 
+**取关我的名单（v2.1.13）**
+28. **记录「关注我后又取关」的人** — 每日自动拉取粉丝列表快照并与上一次比对，差集即取关者：写入「取关」tab（昵称/UID/日期/状态），自动加入「不再回关」名单，支持逐条「加入黑名单 / 忽略」与 CSV 导出。仅读取粉丝列表、不对 B 站做写操作。受 B 站接口限制仅覆盖最近 1000 名粉丝（粉丝数超 1000 的账号更早的取关者无法覆盖，界面与日志均有提示）
+
+**审计修复（v2.1.14，RB1–RB23）**
+29. **安全与数据完整性** — 热更新下载后校验 SHA256（发布侧产出 `sha256sums.txt`，不一致即中止）+ HTTP Range 断点续传；三处 CSV 导出统一防公式注入；Cookie 落盘改用系统 DPAPI（`safeStorage`）加密；操作明细落盘持久化（重启不丢）
+30. **稳定性与合规** — 单实例锁（杜绝安装版与旧便携版并发写同一 data.json）；登录临时会话自动清理；主进程未捕获异常写日志并通知界面；高频统计字段延迟落盘降低写入放大；每日上限/粉丝快照/取关节流统一使用本地日期（消除 UTC 跨天错位 8 小时）
+31. **风控与体验** — 新增「休息时段 / 每周休息日」（命中自动暂停循环）、「跳过大会员」过滤、多账号按 UID 分散 UA；来源统计自动清理（30 天/上限 500）；待核验队列设上限与超龄丢弃；明细/统计渲染改 rAF 合并，降低高频刷新卡顿
+
 ## 对比参考的浏览器脚本方案
 
 | | 浏览器 Console 脚本 | 本工具 |
@@ -67,10 +75,10 @@
 
 ## 安装使用
 
-> 当前产物在 **`dist/`**（v2.1.12）
+> 当前产物在 **`dist/`**（v2.1.14）
 
-方式一：安装版 —— `dist\B站关注管理台-2.1.12.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
-方式二：便携版 —— `dist\B站关注管理台-2.1.12-便携版.exe`（单文件约 96MB，双击即用，免安装）
+方式一：安装版 —— `dist\B站关注管理台-2.1.14.exe`（NSIS，可选安装路径，建桌面/开始菜单快捷方式）
+方式二：便携版 —— `dist\B站关注管理台-2.1.14-便携版.exe`（单文件约 96MB，双击即用，免安装）
 方式三：免打包 —— `dist\win-unpacked\B站关注管理台.exe`（解压版，便于排查）
 
 已验证：打包后的 EXE 执行 `--selftest` 通过，结果写入 `%APPDATA%\bili-relation-manager\selftest.txt`。
@@ -125,9 +133,10 @@ bili-relation-manager/
 ```bash
 npm install
 npm start          # 开发模式运行
-npm test           # 全套测试：smoke 27 + engine 57 + ui 14 = 98 项
+npm test           # 全套测试：smoke 27 + engine 57 + ui 35 = 119 项
 node test/engine.js  # 仅功能离线测试（并发/上限/白名单/演练/停止/搜索找目标/回关率/自动循环/异常重启/看门狗/满关自救/源负缓存/轮转/节流/熔断，57 项）
 npm run build      # 打包 Windows x64，产出 nsis 安装包 + portable 单文件
+npm run clean:dist # 清理历史打包产物，只保留当前版本（删除 dist-v*、旧版 exe/blockmap、latest.yml）
 node tools/verify-asar.js   # 打包后校验 asar 里文件齐全 + 版本标记都在（PASS/FAIL）
 ```
 
@@ -140,10 +149,12 @@ node tools/verify-asar.js   # 打包后校验 asar 里文件齐全 + 版本标�
 2. 打 tag 并推送，创建 Release 后上传两个 EXE 作为资产：
 
 ```bash
-git tag v2.1.12 && git push origin v2.1.12
-# 创建 Release（notes 取自 RELEASE_NOTES.md），然后用发布脚本上传资产：
+git tag v2.1.14 && git push origin v2.1.14
+# 创建 Release（notes 取自 RELEASE_NOTES.md），上传两个 EXE + sha256sums.txt：
 GH_TOKEN=<github token> node tools/publish-release.js
 ```
+
+> 发布脚本会同时生成并上传 `sha256sums.txt`；应用内热更新下载后会校验 SHA256，不匹配直接中止（v2.1.14）。若校验文件缺失，更新仅退化为体积校验并提示。
 
 > 打包时若卡在下载（`Timeout awaiting 'request'`），先设国内镜像：
 > `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`，并确保 `LOCALAPPDATA` 有值（否则 electron-builder 缓存目录解析失败，每次都要重新下载工具链）。
@@ -164,9 +175,12 @@ GH_TOKEN=<github token> node tools/publish-release.js
 
 - `nodeIntegration: false` + `contextIsolation: true`，渲染层拿不到 Node
 - IPC 全部白名单注册，入参在主进程校验与转字符串
-- 账号凭证仅保存在本机 `%APPDATA%\bili-relation-manager\data.json`，不外传
+- 账号凭证仅保存在本机 `%APPDATA%\bili-relation-manager\data.json`，不外传；v2.1.14 起 Cookie 经系统 DPAPI（Electron `safeStorage`）加密后落盘（内存中才明文），旧版明文数据自动迁移
+- 热更新下载后校验 SHA256（`sha256sums.txt`），不匹配即中止，不替换进程
+- 单实例锁：同一时间只允许一个实例运行，避免多版本并发写同一 `data.json`
 - 默认「演练模式」开启；`-509` 限流自动暂停；`-352` / `-111` 致命码终止该账号任务
-- 支持「特别关注」跳过、认证账号跳过、全局白名单 UID
+- 支持「特别关注」跳过、认证账号跳过、大会员跳过、全局白名单 UID
+- CSV 导出统一防公式注入（`= + - @` 前置单引号）
 
 ## 风险提示
 
