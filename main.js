@@ -5,13 +5,21 @@ const path = require('path');
 const fs = require('fs');
 
 const { Store } = require('./src/store');
-const { BiliClient } = require('./src/bilibili');
+const { BiliClient, sleep } = require('./src/bilibili');
 const { Engine, sourceLabel, accountsToAutoStart } = require('./src/task');
 const { Updater } = require('./src/updater');
+const { canUnfollow } = require('./src/batch-unfollow');
+
+/** 数值范围钳制（main 内多处复用，统一放这里） */
+function clampNum(v, lo, hi, dft) {
+  const n = Number(v);
+  if (Number.isNaN(n)) return dft;
+  return Math.min(hi, Math.max(lo, n));
+}
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-01 审计修复 RB1-RB23';
+const BUILD_TAG = '2026-11-02 批量取关+筛选 v2.1.16';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -480,6 +488,169 @@ function registerIPC() {
   }));
 
   ipcMain.handle('app:exportCsv', safe('app:exportCsv', async () => exportCsvNow()));
+
+  /* ── 批量取关（一键取关 + 筛选）── */
+  // 搜索接口偶发 -412 限流，退避重试（与 task.js 内逻辑一致）
+  async function searchWithRetryMain(client, kw, pn, accId) {
+    let last = null;
+    for (let i = 0; i < 3; i++) {
+      const j = await client.searchUsers(kw, pn, 50);
+      if (j.code === 0) return j;
+      last = j;
+      if (j.code === -412 || j.code === -509 || j.code === -799) {
+        if (j.code === -412) await client.ensureBuvid();
+        const wait = 5000 * Math.pow(2, i);
+        sendLog('warn', `批量取关搜索被限流（${j.message}），${Math.round(wait / 1000)}s 后重试第 ${i + 1}/3 次`);
+        await sleep(wait);
+        continue;
+      }
+      return j;
+    }
+    return last || { code: -1, message: '搜索失败', list: [] };
+  }
+  function sendUnfollowProgress(payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('bus:unfollowProgress', payload); } catch (e) { /* ignore */ }
+    }
+  }
+
+  /** 关键字搜索：返回带 粉丝数 + 关系位 的用户列表（批量取关的筛选数据源之一） */
+  ipcMain.handle('unfollow:search', safe('unfollow:search', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const keyword = String((p && p.keyword) || '').trim();
+    if (!keyword) return { ok: false, error: '关键词为空' };
+    const client = new BiliClient(acc.cookie);
+    if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
+    const nav = await client.nav();
+    if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
+    const maxPages = clampNum((p && p.maxPages) || 3, 1, 20);
+    const list = [];
+    for (let pn = 1; pn <= maxPages; pn++) {
+      const j = await searchWithRetryMain(client, keyword, pn, id);
+      if (!j || j.code !== 0) {
+        if (j && (j.code === -352 || j.code === -101)) break;
+        break;
+      }
+      for (const it of (j.list || [])) {
+        list.push({
+          mid: String(it.mid), uname: it.uname || '',
+          fans: Number(it.fans) || 0,
+          attribute: (typeof it.attribute === 'number') ? it.attribute : null
+        });
+      }
+      if (!((j.list || []).length)) break;
+      if (pn < maxPages) await sleep(store.get().global.pageGap || 1200);
+    }
+    return { ok: true, list, total: list.length };
+  }));
+
+  /** 载入「我的关注列表」：用于无关键字排查「我关注但 TA 未回关」的人 */
+  ipcMain.handle('unfollow:loadFollowings', safe('unfollow:loadFollowings', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const client = new BiliClient(acc.cookie);
+    if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
+    const nav = await client.nav();
+    if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
+    // 关注列表接口无 1000 硬上限，但为防一次载入过多、且粉丝数区间筛选在关注模式不可用，
+    // 这里最多读 20 页（1000 条），与「取关名单」监控口径一致，覆盖绝大多数账号
+    const maxPages = clampNum((p && p.maxPages) || 20, 1, 20);
+    const list = [];
+    let pn = 1, total = Infinity;
+    while (pn <= maxPages && (pn - 1) * 50 < total) {
+      const j = await client.followings(pn, 50, client.mid, '');
+      if (!j || j.code !== 0) {
+        if (j && (j.code === -352 || j.code === -101)) break;
+        break;
+      }
+      if (typeof j.data.total === 'number') total = j.data.total;
+      for (const it of (j.data.list || [])) {
+        list.push({
+          mid: String(it.mid), uname: it.uname || '',
+          fans: null, // 关注列表接口不返回对方粉丝数；粉丝数区间筛选请在「关键字搜索」模式使用
+          attribute: (typeof it.attribute === 'number') ? it.attribute : null
+        });
+      }
+      if (!((j.data.list || []).length)) break;
+      pn++;
+      if (pn <= maxPages) await sleep(store.get().global.pageGap || 1200);
+    }
+    return { ok: true, list, total: typeof total === 'number' ? total : list.length };
+  }));
+
+  /**
+   * 一键批量取关：在主进程执行真实写操作（act=2），带节流 / 看门狗 / 每日上限 / 安全护栏。
+   * 逐条进度通过 bus:unfollowProgress 推给界面；最终返回汇总。
+   */
+  ipcMain.handle('unfollow:batch', safe('unfollow:batch', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const items = Array.isArray(p && p.items) ? p.items : [];
+    if (!items.length) return { ok: false, error: '取关名单为空' };
+    const client = new BiliClient(acc.cookie);
+    if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
+    const nav = await client.nav();
+    if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
+
+    const g = store.get().global;
+    const excl = {
+      white: new Set((g.whiteList || []).map(String)),
+      neverFollow: new Set((g.neverFollow || []).map(String)),
+      dead: (store._deadSet) || new Set((g.deadUsers || []).map(String)),
+      mutual: (p && p.excludeMutual) !== false   // 默认保护互关：不取关互关的人
+    };
+    const delayMin = clampNum((p && p.delayMin) || acc.cfg.delayMin || 3000, 1000, 600000);
+    const delayMax = Math.max(delayMin, clampNum((p && p.delayMax) || acc.cfg.delayMax || 6000, 1000, 600000));
+    const dailyCap = Number(acc.cfg.dailyCap) || 0;
+
+    let done = 0, ok = 0, fail = 0, skip = 0;
+    const total = items.length;
+    const startAt = Date.now();
+    const WATCHDOG_MS = 20 * 60000;   // 单批总耗时保险：超过 20 分钟视为异常，停止以免卡死
+
+    sendUnfollowProgress({ type: 'start', total });
+    for (const it of items) {
+      if (Date.now() - startAt > WATCHDOG_MS) {
+        sendLog('error', `批量取关单批耗时超过 ${WATCHDOG_MS / 60000} 分钟，已停止以防卡死`);
+        break;
+      }
+      if (dailyCap > 0 && store.getAccount(id).daily.ops >= dailyCap) {
+        sendLog('warn', '批量取关：已达每日操作上限，停止');
+        break;
+      }
+      const chk = canUnfollow(it, excl);
+      if (!chk.ok) {
+        skip++; done++;
+        sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '跳过', detail: chk.reason, done, total, ok, fail, skip });
+        continue;
+      }
+      let r;
+      try { r = await client.modify(Number(it.mid), 2); }
+      catch (e) { r = { ok: false, code: -9999, message: (e && e.message) || String(e), kind: 'fatal' }; }
+      if (r.ok) {
+        ok++; done++;
+        store.addNeverFollow(String(it.mid));   // 取关后进入「不再关注」名单
+        store.bumpDaily(id, 1);
+        sendLog('ok', `已取关 ${it.uname || it.mid} (${it.mid})｜已加入不再关注名单`);
+        sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '已取关', detail: '已加入不再关注名单', done, total, ok, fail, skip });
+      } else {
+        fail++; done++;
+        sendLog('error', `批量取关失败 ${it.uname || it.mid}：${r.message || ('code=' + r.code)}`);
+        sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '失败', detail: r.message || ('code=' + r.code), done, total, ok, fail, skip });
+        if (r.kind === 'fatal') { sendLog('error', '批量取关遇到致命错误码，已停止'); break; }
+        if (r.kind === 'ratelimit') { sendLog('warn', '触发限流，暂停 60s 后继续'); await sleep(60000); }
+      }
+      const wait = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+      await sleep(wait);
+    }
+    try { store.flush(); } catch (e) { /* ignore */ }
+    sendUnfollowProgress({ type: 'done', total, done, ok, fail, skip });
+    return { ok: true, total, done, okCount: ok, fail, skip };
+  }));
 
   // ── 热更新 ──
   ipcMain.handle('updater:check', safe('updater:check', () => runUpdateCheck({ manual: true })));

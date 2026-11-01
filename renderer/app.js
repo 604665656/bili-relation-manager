@@ -6,6 +6,16 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 
 const ST = { accounts: [], global: {}, selected: null, records: [], logs: [], busy: false, tab: 'log' };
 
+/* 批量取关（一键取关 + 筛选）的临时状态（不落盘） */
+const BATCH = {
+  mode: 'search',     // 'search' | 'follow'
+  items: [],          // 原始候选 { mid, uname, fans, attribute, selected, result, detail }
+  filtered: [],       // 过滤后（引用 items）
+  loading: false,
+  executing: false,
+  reqId: 0            // 防止过期搜索/载入响应覆盖最新结果
+};
+
 /* RB17：高频事件合并渲染——同一 key 在一帧内只重建一次 DOM，避免每条 record/stats 都全量重绘 */
 const _pendingRender = new Set();
 function scheduleRender(key, fn) {
@@ -150,11 +160,27 @@ function wireEvents() {
     $('#pane-record').hidden = tab !== 'record';
     $('#pane-stat').hidden = tab !== 'stat';
     $('#pane-unfollower').hidden = tab !== 'unfollower';
+    $('#pane-batch').hidden = tab !== 'batch';
     if (tab === 'unfollower') renderUnfollowers();
+    if (tab === 'batch') renderBatch();
   });
   $('#btn-export-unfollower').onclick = doExportUnfollowers;
   $('#unfollowerbox').addEventListener('click', onUnfollowerBoxClick);
   $('#cfg-track-unfollowers').addEventListener('change', autoSaveCfg);
+
+  /* ── 批量取关 ── */
+  $$('.seg-btn[data-bmode]').forEach((b) => b.onclick = () => switchBatchMode(b.dataset.bmode));
+  $('#btn-batch-search').onclick = doBatchSearch;
+  $('#btn-batch-load').onclick = doBatchLoad;
+  $('#batch-keyword').addEventListener('keydown', (e) => { if (e.key === 'Enter') doBatchSearch(); });
+  ['#batch-filter-kw', '#batch-only-oneway', '#batch-only-following', '#batch-minfans', '#batch-maxfans']
+    .forEach((sel) => $(sel).addEventListener('input', applyBatchFiltersLive));
+  $('#batch-selall').onclick = onBatchSelAll;
+  $('#btn-batch-unfollow').onclick = openBatchConfirm;
+  $('#btn-batch-confirm-ok').onclick = doBatchUnfollow;
+  $('#btn-batch-confirm-cancel').onclick = () => hideEl($('#modal-batch'));
+  $('#modal-batch').onclick = (e) => { if (e.target === $('#modal-batch')) hideEl($('#modal-batch')); };
+  if (window.api.onUnfollowProgress) window.api.onUnfollowProgress(onUnfollowProgress);
 }
 
 function readCfgForm() {
@@ -675,6 +701,243 @@ async function onUnfollowerBoxClick(e) {
   } else {
     toast('操作失败：' + ((r && r.error) || '未知'));
     btn.disabled = false;
+  }
+}
+
+/* ─────────── 批量取关（一键取关 + 筛选） ─────────── */
+/** 关系位 → 可读文本（2=我关注 4=TA回关 6=互关 128=拉黑） */
+function relText(attr) {
+  if (typeof attr !== 'number') return '未知';
+  if (attr & 128) return '已拉黑';
+  if ((attr & 6) === 6) return '互关';
+  if (attr & 2) return '单向（我关注）';
+  if (attr & 4) return 'TA 关注我';
+  return '未关注';
+}
+function relClass(attr) {
+  if (typeof attr !== 'number') return '';
+  if (attr & 128) return 'res-skip';
+  if ((attr & 6) === 6) return 'res-ok';
+  if (attr & 2) return 'res-pending';
+  if (attr & 4) return 'res-ok';
+  return 'res-skip';
+}
+function cssEscape(s) { return String(s).replace(/["\\]/g, '\\$&'); }
+function removeBatchBar() {
+  hideEl($('#batch-prog'));   // 仅隐藏，保留静态元素（ui 单测要求 id 存在于 HTML）
+}
+
+function switchBatchMode(mode) {
+  BATCH.mode = mode;
+  $$('.seg-btn[data-bmode]').forEach((b) => b.classList.toggle('active', b.dataset.bmode === mode));
+  $('#batch-search-row').hidden = mode !== 'search';
+  $('#batch-follow-row').hidden = mode !== 'follow';
+  // 关注列表模式接口不返回对方粉丝数 → 粉丝数区间筛选不可用
+  const fanDisabled = mode === 'follow';
+  $('#batch-minfans').disabled = fanDisabled;
+  $('#batch-maxfans').disabled = fanDisabled;
+  $('#batch-fans-note').textContent = fanDisabled ? '（关注列表模式无粉丝数，请用搜索模式）' : '';
+  if (fanDisabled) { $('#batch-minfans').value = ''; $('#batch-maxfans').value = ''; }
+  BATCH.items = []; BATCH.filtered = []; BATCH.reqId++;   // 切模式清名单，防过期响应串台
+  removeBatchBar();
+  renderBatch();
+  setStatus(mode === 'search' ? '关键字搜索模式：输入关键词后点「搜索」' : '我的关注列表模式：点「载入我的关注」');
+}
+
+async function doBatchSearch() {
+  if (!ST.selected) return toast('请先选中一个账号');
+  const kw = $('#batch-keyword').value.trim();
+  if (!kw) return toast('请输入搜索关键词');
+  const maxPages = $('#batch-search-pages').checked ? clampInt($('#batch-maxpages').value, 1, 20, 3) : 3;
+  const reqId = ++BATCH.reqId;
+  BATCH.loading = true; setBatchBusy(true);
+  setStatus('正在搜索「' + kw + '」…');
+  let r;
+  try { r = await window.api.unfollowSearch(ST.selected, kw, maxPages); }
+  catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+  if (reqId !== BATCH.reqId) return;   // 过期响应（用户已切模式/重新搜索）直接丢弃
+  BATCH.loading = false; setBatchBusy(false);
+  if (!r || !r.ok) { setStatus('搜索失败：' + ((r && r.error) || '未知')); return toast('搜索失败：' + ((r && r.error) || '未知')); }
+  BATCH.items = (r.list || []).map((it) => Object.assign({}, it, { selected: false, result: '', detail: '' }));
+  applyBatchFilters();
+  setStatus(`搜索「${kw}」返回 ${BATCH.items.length} 人，筛选后展示 ${BATCH.filtered.length} 人`);
+  toast(`搜索到 ${BATCH.items.length} 人`);
+}
+
+async function doBatchLoad() {
+  if (!ST.selected) return toast('请先选中一个账号');
+  const reqId = ++BATCH.reqId;
+  BATCH.loading = true; setBatchBusy(true);
+  setStatus('正在载入我的关注列表…');
+  let r;
+  try { r = await window.api.unfollowLoadFollowings(ST.selected, 20); }
+  catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+  if (reqId !== BATCH.reqId) return;
+  BATCH.loading = false; setBatchBusy(false);
+  if (!r || !r.ok) { setStatus('载入失败：' + ((r && r.error) || '未知')); return toast('载入失败：' + ((r && r.error) || '未知')); }
+  BATCH.items = (r.list || []).map((it) => Object.assign({}, it, { selected: false, result: '', detail: '' }));
+  applyBatchFilters();
+  setStatus(`已载入关注 ${BATCH.items.length} 人（共 ${r.total} 关注），筛选后展示 ${BATCH.filtered.length} 人`);
+  toast(`载入 ${BATCH.items.length} 人`);
+}
+
+function applyBatchFiltersLive() { applyBatchFilters(); }
+
+function applyBatchFilters() {
+  const kw = $('#batch-filter-kw').value;
+  const onlyOneWay = $('#batch-only-oneway').checked;
+  const onlyFollowing = $('#batch-only-following').checked;
+  const minFans = $('#batch-minfans').value;
+  const maxFans = $('#batch-maxfans').value;
+  // 与主进程 batch-unfollow.js 同一套语义（渲染进程无 node，这里本地实现精简版）
+  BATCH.filtered = BATCH.items.filter((it) => {
+    if (kw) {
+      const h = `${it.uname || ''} ${it.mid || ''}`.toLowerCase();
+      if (!h.includes(kw.toLowerCase())) return false;
+    }
+    const attr = (typeof it.attribute === 'number') ? it.attribute : null;
+    if (onlyFollowing && attr !== null && !(attr & 2)) return false;
+    if (onlyOneWay) {
+      if (attr === null) return false;          // 关系未知，保守排除
+      if (!(attr & 2)) return false;            // 我都没关注 TA
+      if (attr & 4) return false;               // 互关排除
+    }
+    if (minFans !== '' && !Number.isNaN(Number(minFans)) && Number(it.fans || 0) < Number(minFans)) return false;
+    if (maxFans !== '' && !Number.isNaN(Number(maxFans)) && Number(it.fans || 0) > Number(maxFans)) return false;
+    return true;
+  });
+  renderBatch();
+}
+
+function setBatchBusy(b) {
+  $('#btn-batch-search').disabled = b;
+  $('#btn-batch-load').disabled = b;
+}
+
+function renderBatch() {
+  const box = $('#batchbox');
+  const a = ST.accounts.find((x) => x.id === ST.selected);
+  if (!a) { box.innerHTML = '<p class="muted" style="padding:10px">请先登录并选中一个账号</p>'; updateBatchCounts(); return; }
+  $('#batch-acc-hint').textContent = `当前账号：${a.uname}`;
+  if (!BATCH.items.length) {
+    box.innerHTML = '<p class="muted" style="padding:10px">选择上方模式并加载名单后，这里会列出可批量取关的对象。取关前会二次确认并预览名单。</p>';
+    updateBatchCounts();
+    return;
+  }
+  const rows = BATCH.filtered;
+  if (!rows.length) {
+    box.innerHTML = '<p class="muted" style="padding:10px">当前筛选条件下没有可显示的对象，放宽条件试试。</p>';
+    updateBatchCounts();
+    return;
+  }
+  let h = '<table><tr><th class="cbs"></th><th>昵称</th><th>UID</th><th>粉丝数</th><th>关系</th><th>状态</th></tr>';
+  for (const it of rows) {
+    const canPick = !BATCH.executing;
+    h += `<tr data-mid="${escapeAttr(it.mid)}">` +
+      `<td class="cbs"><input type="checkbox" class="bchk" data-mid="${escapeAttr(it.mid)}" ${it.selected ? 'checked' : ''} ${canPick ? '' : 'disabled'}></td>` +
+      `<td>${escapeHtml(it.uname || '')}</td>` +
+      `<td>${escapeHtml(String(it.mid))}</td>` +
+      `<td>${it.fans == null ? '—' : fmtNum(it.fans)}</td>` +
+      `<td class="${relClass(it.attribute)}">${relText(it.attribute)}</td>` +
+      `<td class="bstatus">${it.result ? escapeHtml(it.result) + (it.detail ? ' · ' + escapeHtml(it.detail) : '') : ''}</td>` +
+      `</tr>`;
+  }
+  box.innerHTML = h + '</table>';
+  box.querySelectorAll('.bchk').forEach((cb) => {
+    cb.onchange = () => {
+      const it = BATCH.filtered.find((x) => String(x.mid) === String(cb.dataset.mid));
+      if (it) { it.selected = cb.checked; updateBatchCounts(); }
+    };
+  });
+  updateBatchCounts();
+}
+
+function updateBatchCounts() {
+  const total = BATCH.items.length;
+  const shown = BATCH.filtered.length;
+  const sel = BATCH.filtered.filter((x) => x.selected).length;
+  $('#batch-count').textContent = `共 ${total} 人 · 筛选后 ${shown} 人 · 已选 ${sel} 人`;
+  const btn = $('#btn-batch-unfollow');
+  btn.textContent = `一键取关（${sel}）`;
+  btn.disabled = sel === 0 || BATCH.loading || BATCH.executing;
+}
+
+function onBatchSelAll(e) {
+  const check = e.target.checked;
+  BATCH.filtered.forEach((it) => { it.selected = check; });
+  renderBatch();
+}
+
+function openBatchConfirm() {
+  const sel = BATCH.filtered.filter((x) => x.selected);
+  if (!sel.length) return;
+  $('#batch-confirm-n').textContent = sel.length;
+  let h = '<table><tr><th>昵称</th><th>UID</th><th>关系</th></tr>';
+  for (const it of sel.slice(0, 30)) {
+    h += `<tr><td>${escapeHtml(it.uname || '')}</td><td>${escapeHtml(String(it.mid))}</td><td>${relText(it.attribute)}</td></tr>`;
+  }
+  if (sel.length > 30) h += `<tr><td colspan="3" class="muted">… 其余 ${sel.length - 30} 人略</td></tr>`;
+  h += '</table>';
+  $('#batch-confirm-list').innerHTML = h;
+  $('#batch-confirm-msg').textContent = '';
+  showEl($('#modal-batch'));
+}
+
+async function doBatchUnfollow() {
+  const sel = BATCH.filtered.filter((x) => x.selected);
+  if (!sel.length) return;
+  hideEl($('#modal-batch'));
+  BATCH.executing = true;
+  setBatchBusy(true);
+  $('#batch-selall').disabled = true;
+  setStatus(`正在批量取关 ${sel.length} 人…（白名单/互关/不关注名单/已注销会被跳过）`);
+  sel.forEach((it) => { it.result = ''; it.detail = ''; });
+  renderBatch();
+  removeBatchBar();
+  showEl($('#batch-prog'));
+  const barEl = $('#batch-prog');
+  if (barEl) { barEl.querySelector('i').style.width = '0%'; $('#batch-prog-txt').textContent = ''; }
+  const items = sel.map((it) => ({ mid: String(it.mid), uname: it.uname, attribute: it.attribute, fans: it.fans }));
+  try {
+    await window.api.unfollowBatch(ST.selected, items, { excludeMutual: true });
+  } catch (e) {
+    toast('批量取关异常：' + ((e && e.message) || e));
+    BATCH.executing = false; setBatchBusy(false); $('#batch-selall').disabled = false; updateBatchCounts();
+  }
+}
+
+async function onUnfollowProgress(ev) {
+  if (!ev || !ev.type) return;
+  const box = $('#batchbox');
+  const bar = $('#batch-prog');
+  if (ev.type === 'start') {
+    if (bar) { bar.querySelector('i').style.width = '0%'; $('#batch-prog-txt').textContent = `0 / ${ev.total}`; }
+    return;
+  }
+  if (ev.type === 'item') {
+    const row = box.querySelector(`tr[data-mid="${cssEscape(ev.mid)}"]`);
+    if (row) {
+      const cls = /已取关/.test(ev.result) ? 'res-ok' : /失败/.test(ev.result) ? 'res-fail' : 'res-skip';
+      const cell = row.querySelector('.bstatus');
+      if (cell) { cell.className = 'bstatus ' + cls; cell.textContent = ev.result + (ev.detail ? ' · ' + ev.detail : ''); }
+    }
+    if (bar) {
+      const pct = ev.total ? Math.round((ev.done / ev.total) * 100) : 0;
+      bar.querySelector('i').style.width = pct + '%';
+      $('#batch-prog-txt').textContent = `${ev.done} / ${ev.total}（成功 ${ev.ok} · 失败 ${ev.fail} · 跳过 ${ev.skip}）`;
+    }
+    return;
+  }
+  if (ev.type === 'done') {
+    BATCH.executing = false; setBatchBusy(false); $('#batch-selall').disabled = false;
+    updateBatchCounts();
+    if (bar) {
+      bar.querySelector('i').style.width = '100%';
+      $('#batch-prog-txt').textContent = `完成：成功 ${ev.ok} · 失败 ${ev.fail} · 跳过 ${ev.skip}`;
+    }
+    setStatus(`批量取关完成：成功 ${ev.ok} · 失败 ${ev.fail} · 跳过 ${ev.skip}`);
+    toast(`批量取关完成：成功 ${ev.ok} 人`);
+    if (ST.selected) { try { await window.api.refreshStats(); } catch (e) { /* ignore */ } await reloadState(); }
   }
 }
 

@@ -39,6 +39,17 @@ contextBridge.exposeInMainWorld('api', {
   unfollowerMark: (id, mid, status) => invoke('unfollower:mark', { id: String(id || ''), mid: String(mid || ''), status: status === 'ignored' ? 'ignored' : 'blocked' }),
   unfollowerExport: (id) => invoke('unfollower:export', { id: String(id || '') }),
 
+  // ── 批量取关（一键取关 + 筛选）──
+  unfollowSearch: (id, keyword, maxPages) => invoke('unfollow:search', { id: String(id || ''), keyword: String(keyword || ''), maxPages }),
+  unfollowLoadFollowings: (id, maxPages) => invoke('unfollow:loadFollowings', { id: String(id || ''), maxPages }),
+  unfollowBatch: (id, items, opts) => invoke('unfollow:batch', {
+    id: String(id || ''),
+    items: Array.isArray(items) ? items : [],
+    excludeMutual: opts && opts.excludeMutual !== false,
+    delayMin: opts && opts.delayMin, delayMax: opts && opts.delayMax
+  }),
+  onUnfollowProgress: (cb) => subscribe('bus:unfollowProgress', cb),
+
   updaterCheck: () => invoke('updater:check'),
   updaterInfo: () => invoke('updater:info'),
   updaterApply: () => invoke('updater:apply'),
