@@ -16,6 +16,7 @@
     </div>
     <div class="actions">
       <button class="btn primary" id="btn-add">+ 扫码登录账号</button>
+      <button class="btn" id="btn-add-qr">二维码扫码登录</button>
       <button class="btn" id="btn-import">手动导入 Cookie</button>
       <button class="btn" id="btn-start-all">▶ 全部开始</button>
       <button class="btn danger" id="btn-stop-all">■ 全部停止</button>
@@ -355,6 +356,24 @@
         <button class="btn" id="btn-import-cancel">取消</button>
         <span class="grow"></span>
         <span class="muted" id="import-msg"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 应用内二维码扫码登录（官方 passport API，不依赖浏览器弹窗） -->
+  <div class="modal" id="modal-qr" hidden>
+    <div class="modal-box qr-box">
+      <div class="modal-h">二维码扫码登录（官方接口 · 应用内扫码）</div>
+      <div class="modal-b qr-body">
+        <p class="muted">用手机 B 站 App 扫下方二维码，并在手机上点「确认登录」。二维码约 2 分钟有效，过期可点「刷新二维码」重新生成。</p>
+        <div class="qr-imgwrap"><img id="qr-img" alt="登录二维码"></div>
+        <div class="qr-status" id="qr-status">正在生成二维码…</div>
+      </div>
+      <div class="modal-f">
+        <button class="btn small" id="btn-qr-refresh">刷新二维码</button>
+        <button class="btn small" id="btn-qr-cancel">取消</button>
+        <span class="grow"></span>
+        <span class="muted">扫码不通？可改用顶部「手动导入 Cookie」</span>
       </div>
     </div>
   </div>

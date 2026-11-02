@@ -162,6 +162,8 @@ class Store {
     if (this.codec) {
       for (const a of this.data.accounts) {
         try { a.cookie = this.codec.decrypt(a.cookie || ''); } catch (e) { a.cookie = a.cookie || ''; }
+        // v2.3.0：refreshToken 同样加密落盘（与 cookie 同密级）
+        try { a.refreshToken = this.codec.decrypt(a.refreshToken || ''); } catch (e) { a.refreshToken = a.refreshToken || ''; }
       }
     }
     this._deadSet = null;   // 懒加载索引
@@ -176,6 +178,7 @@ class Store {
     return {
       id: a.id || crypto.randomUUID(),
       uid: a.uid, uname: a.uname, face: a.face, cookie: a.cookie,
+      refreshToken: a.refreshToken || '',
       cfg: normalizeCfg(a.cfg),
       // 实时统计：关注数 / 粉丝数
       live: Object.assign({ following: 0, follower: 0, prevFollowing: 0, prevFollower: 0, at: 0 }, a.live || {}),
@@ -212,7 +215,8 @@ class Store {
       if (this.codec) {
         payload = Object.assign({}, this.data, {
           accounts: this.data.accounts.map((a) => Object.assign({}, a, {
-            cookie: this.codec.encrypt(a.cookie || '')
+            cookie: this.codec.encrypt(a.cookie || ''),
+            refreshToken: this.codec.encrypt(a.refreshToken || '')
           }))
         });
       }

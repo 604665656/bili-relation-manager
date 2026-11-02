@@ -33,7 +33,7 @@ const UPD = { info: null, busy: false };   // 热更新状态
 /* ─────────── 启动 ─────────── */
 async function boot() {
   // 启动第一件事：强制隐藏所有浮层，绝不依赖样式表
-  ['#modal-import', '#modal-support', '#modal-update', '#login-bar'].forEach((sel) => hideEl($(sel)));
+  ['#modal-import', '#modal-support', '#modal-update', '#modal-qr', '#login-bar'].forEach((sel) => hideEl($(sel)));
   wireEvents();
   await reloadState();
   window.api.onLog(onLog);
@@ -155,6 +155,7 @@ function makeResizer(id, side) {
 function wireEvents() {
   initLayout();
   $('#btn-add').onclick = doLogin;
+  $('#btn-add-qr').onclick = doQrLogin;
   $('#btn-import').onclick = openImport;
   $('#btn-login-refresh').onclick = () => window.api.loginRefresh();
   $('#btn-login-cancel').onclick = () => window.api.loginCancel();
@@ -163,6 +164,14 @@ function wireEvents() {
   $('#btn-import-cancel').onclick = closeImport;
   // 点遮罩空白处关闭
   $('#modal-import').onclick = (e) => { if (e.target === $('#modal-import')) closeImport(); };
+  $('#btn-qr-refresh').onclick = qrRegenerate;
+  $('#btn-qr-cancel').onclick = qrCancel;
+  $('#modal-qr').onclick = (e) => { if (e.target === $('#modal-qr')) qrCancel(); };
+  // 账号卡片里的「续期」按钮（refresh_token 免扫码续命），用事件委托避免重复 id
+  $('#acc-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act="renew"]');
+    if (btn) { e.stopPropagation(); doRenewOne(btn.getAttribute('data-id')); }
+  });
   // 联系合作 / 打赏支持
   $('#btn-support').onclick = openSupport;
   $('#btn-support-close').onclick = closeSupport;
@@ -353,11 +362,86 @@ function hideEl(el) {
   el.style.display = 'none';
 }
 
+/* ─────────── 应用内二维码扫码登录（官方 passport API） ─────────── */
+let qrTimer = null;
+let qrClosedByUser = false;
+
+async function qrRegenerate() {
+  $('#qr-status').textContent = '正在生成二维码…';
+  let g = null;
+  try { g = await window.api.qrStart(); }
+  catch (e) { $('#qr-status').textContent = '生成失败：' + (e && e.message || e); return; }
+  if (!g || !g.ok) {
+    $('#qr-status').textContent = '生成失败：' + ((g && g.message) || '未知错误');
+    return;
+  }
+  $('#qr-img').src = g.dataUrl;
+  $('#qr-status').textContent = '请用手机 B 站 App 扫码，并在手机上点「确认登录」';
+}
+
+async function doQrLogin() {
+  qrClosedByUser = false;
+  showEl($('#modal-qr'));
+  await qrRegenerate();
+  if (qrTimer) clearInterval(qrTimer);
+  qrTimer = setInterval(qrPollLoop, 1500);
+}
+
+async function qrPollLoop() {
+  if (qrClosedByUser) { if (qrTimer) clearInterval(qrTimer); qrTimer = null; return; }
+  let r = null;
+  try { r = await window.api.qrPoll(); } catch (e) { return; }
+  if (!r) return;
+  if (r.status === 'throttled' || r.status === 'idle') return;
+  if (r.status === 'waiting') {
+    $('#qr-status').textContent = '等待扫码…（请用手机 B 站 App 扫码）';
+  } else if (r.status === 'scanned') {
+    $('#qr-status').textContent = '已扫描，请在手机上点「确认登录」';
+  } else if (r.status === 'expired') {
+    $('#qr-status').textContent = '二维码已过期，正在重新生成…';
+    await qrRegenerate();
+  } else if (r.status === 'success') {
+    if (qrTimer) clearInterval(qrTimer); qrTimer = null;
+    hideEl($('#modal-qr'));
+    await reloadState();
+    toast('扫码登录成功：' + ((r.account && r.account.uname) || ''));
+    setStatus('就绪');
+  } else if (r.status === 'error') {
+    $('#qr-status').textContent = '登录校验未通过：' + (r.message || '');
+  }
+}
+
+function qrCancel() {
+  qrClosedByUser = true;
+  if (qrTimer) { clearInterval(qrTimer); qrTimer = null; }
+  try { window.api.qrCancel(); } catch (e) { /* ignore */ }
+  hideEl($('#modal-qr'));
+  $('#qr-status').textContent = '';
+}
+
+/* 续期：refresh_token 免扫码续命 */
+async function doRenewOne(id) {
+  if (!id) return;
+  const a = ST.accounts.find((x) => x.id === id);
+  const name = (a && a.uname) || '该账号';
+  setStatus('正在用 refresh_token 续期 ' + name + '…');
+  let r = null;
+  try { r = await window.api.refreshToken(id); }
+  catch (e) { r = { ok: false, message: (e && e.message || String(e)) }; }
+  if (r && r.ok) {
+    await reloadState();
+    toast('续期成功：' + name);
+    setStatus('就绪');
+  } else {
+    toast('续期失败：' + ((r && r.message) || '未知错误'));
+    setStatus('就绪');
+  }
+}
+
 function openImport() {
   const m = $('#modal-import');
   $('#import-msg').textContent = '';
-  $('#import-cookie').value = '';
-  showEl(m);
+  $('#import-cookie').value = '';  showEl(m);
   $('#import-cookie').focus();
 }
 function closeImport() { hideEl($('#modal-import')); }
@@ -579,6 +663,7 @@ function renderAccounts() {
         <span class="chip idle">${modeText(a.cfg)}</span>
         ${a.cfg.autoLoop ? '<span class="chip running">循环</span>' : ''}
         <span class="chip idle">今日 ${(a.daily && a.daily.ops) || 0}</span>
+        <button class="mini renew" data-act="renew" data-id="${a.id}" title="用 refresh_token 免扫码续期登录态（需账号曾通过扫码登录获得续期凭据）">续期</button>
       </div>
       <div class="prog"><i style="width:${pct}%"></i></div>`;
     box.appendChild(el);

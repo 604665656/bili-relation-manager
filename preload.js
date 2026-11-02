@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('api', {
   loginRefresh: () => invoke('account:loginRefresh'),
   loginCancel: () => invoke('account:loginCancel'),
   importCookie: (cookie) => invoke('account:importCookie', { cookie: String(cookie || '') }),
+  // 官方 passport API 扫码登录（应用内二维码，不依赖浏览器弹窗）
+  qrStart: () => invoke('account:qrStart'),
+  qrPoll: () => invoke('account:qrPoll'),
+  qrCancel: () => invoke('account:qrCancel'),
+  // refresh_token 免扫码续期
+  refreshToken: (id) => invoke('account:refreshToken', { id: String(id || '') }),
   removeAccount: (id) => invoke('account:remove', { id: String(id || '') }),
   updateCfg: (id, cfg) => invoke('account:cfg', { id: String(id || ''), cfg: cfg && typeof cfg === 'object' ? cfg : {} }),
   refreshAccount: (id) => invoke('account:refresh', { id: String(id || '') }),

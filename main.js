@@ -6,6 +6,7 @@ const fs = require('fs');
 
 const { Store } = require('./src/store');
 const { BiliClient, sleep } = require('./src/bilibili');
+const auth = require('./src/auth');
 const { Engine, sourceLabel, accountsToAutoStart } = require('./src/task');
 const { Updater } = require('./src/updater');
 const { canUnfollow, classifyActivity } = require('./src/batch-unfollow');
@@ -19,7 +20,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-02 三搜索路径可用化 · 公开搜索免登录 · 核对关注状态 v2.2.3';
+const BUILD_TAG = '2026-11-03 多方式登录 · 官方API扫码登录 · refresh_token自动续期 v2.3.0';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -409,6 +410,77 @@ function registerIPC() {
   ipcMain.handle('account:loginCancel', safe('account:loginCancel', () => {
     if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
     return true;
+  }));
+
+  /* ── 官方 passport API 扫码登录（不依赖 Electron cookie 罐，打包后更稳，且能拿到 refresh_token）── */
+  let qrState = null;   // { qrcodeKey, lastPoll }
+
+  ipcMain.handle('account:qrStart', safe('account:qrStart', async () => {
+    const g = await auth.generateQr();
+    if (!g.ok) return { ok: false, message: g.message };
+    qrState = { qrcodeKey: g.qrcodeKey, url: g.url, lastPoll: 0 };
+    return { ok: true, qrcodeKey: g.qrcodeKey, url: g.url, dataUrl: g.dataUrl };
+  }));
+
+  /**
+   * 轮询当前二维码状态。渲染层每隔 1.5s 调一次。
+   * 成功（status=success）时自动落库账号并持久化 refreshToken。
+   */
+  ipcMain.handle('account:qrPoll', safe('account:qrPoll', async () => {
+    if (!qrState || !qrState.qrcodeKey) return { status: 'idle' };
+    const now = Date.now();
+    if (now - qrState.lastPoll < 1000) return { status: 'throttled' };
+    qrState.lastPoll = now;
+    const r = await auth.pollQr(qrState.qrcodeKey);
+    if (r.status !== 'success') {
+      return { status: r.status, message: r.message || '' };
+    }
+    // 校验 + 落库
+    const client = new BiliClient(r.cookie);
+    const nav = await client.nav();
+    if (nav.code !== 0) {
+      return { status: 'error', message: `登录校验未通过：${nav.message} (code=${nav.code})` };
+    }
+    const acc = store.upsertAccount({
+      uid: client.profile.mid, uname: client.profile.uname, face: client.profile.face,
+      cookie: r.cookie, refreshToken: r.refreshToken || ''
+    });
+    store.flush();
+    sendLog('ok', `二维码扫码登录成功：${client.profile.uname}（UID ${client.profile.mid}）`);
+    qrState = null;
+    return { status: 'success', account: publicAccount(acc) };
+  }));
+
+  /** 取消当前二维码登录（重新生成前调用） */
+  ipcMain.handle('account:qrCancel', safe('account:qrCancel', () => {
+    qrState = null;
+    return true;
+  }));
+
+  /**
+   * 用 refresh_token 尝试免扫码续期某个账号（启动自动恢复 + 手动「续期」按钮共用）。
+   * 成功后更新 cookie/refreshToken；失败返回原因，调用方退回扫码/导入。
+   */
+  ipcMain.handle('account:refreshToken', safe('account:refreshToken', async (p) => {
+    const acc = p && p.id ? store.getAccount(p.id) : null;
+    if (!acc) return { ok: false, message: '账号不存在' };
+    if (!acc.refreshToken) return { ok: false, message: '该账号没有 refreshToken（多为手动导入 Cookie 登录，无法自动续期；请改用扫码登录）' };
+    const res = await auth.refreshCookie({ cookie: acc.cookie, refreshToken: acc.refreshToken });
+    if (!res.ok) return { ok: false, message: res.message || '续期失败', step: res.step };
+    // 重新校验
+    const client = new BiliClient(res.cookie);
+    const nav = await client.nav().catch(() => null);
+    if (!nav || nav.code !== 0) {
+      return { ok: false, message: '续期已返回新 cookie，但校验未通过，请重新扫码', step: 'verify' };
+    }
+    acc.cookie = res.cookie;
+    acc.refreshToken = res.refreshToken || acc.refreshToken;
+    acc.uid = client.profile.mid;
+    acc.uname = client.profile.uname;
+    acc.face = client.profile.face;
+    store.flush();
+    sendLog('ok', `refresh_token 续期成功：${client.profile.uname}（UID ${client.profile.mid}）`);
+    return { ok: true, account: publicAccount(acc) };
   }));
 
   ipcMain.handle('account:remove', safe('account:remove', (p) => {
@@ -1067,6 +1139,44 @@ app.whenReady().then(async () => {
     }
   } catch (e) {
     sendLog('error', '启动时自动恢复失败：' + (e && e.message || e));
+  }
+
+  // 启动会话自动恢复：穷尽「免扫码续期」——对已过期（nav=-101）且持有 refreshToken 的账号，
+  // 先尝试 refresh_token 续命；失败才退回扫码/导入。避免每次过期都要手动重登。
+  try {
+    setTimeout(async () => {
+      const accs = store.listAccounts();
+      let recovered = 0, needReauth = 0;
+      for (const a of accs) {
+        try {
+          const client = new BiliClient(a.cookie || '');
+          const nav = await client.nav().catch(() => null);
+          if (nav && nav.code === 0) continue;          // 仍有效，跳过
+          if (!a.refreshToken) { needReauth++; continue; } // 无续期凭据，只能重登
+          const res = await auth.refreshCookie({ cookie: a.cookie, refreshToken: a.refreshToken });
+          if (res.ok) {
+            const c2 = new BiliClient(res.cookie);
+            const n2 = await c2.nav().catch(() => null);
+            if (n2 && n2.code === 0) {
+              a.cookie = res.cookie;
+              a.refreshToken = res.refreshToken || a.refreshToken;
+              a.uid = c2.profile.mid; a.uname = c2.profile.uname; a.face = c2.profile.face;
+              store.flush();
+              recovered++;
+              sendLog('ok', `启动自动续期成功：${c2.profile.uname}（UID ${c2.profile.mid}）`);
+            } else { needReauth++; }
+          } else { needReauth++; }
+        } catch (e) { /* 单账号失败不影响其他 */ }
+      }
+      if (recovered) sendLog('info', `启动自动续期完成：成功恢复 ${recovered} 个账号`);
+      if (needReauth) sendLog('warn', `${needReauth} 个账号登录态已失效且无续期凭据，请点「扫码登录」重新登录`);
+      // 主动通知界面刷新账号状态
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('bus:account', { recover: true });
+      }
+    }, 2500);
+  } catch (e) {
+    sendLog('error', '启动会话恢复异常：' + (e && e.message || e));
   }
 
   // 定期落盘（日志高频产生，避免每条都重写文件）

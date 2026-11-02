@@ -1,3 +1,30 @@
+## v2.3.0 多方式登录 · 官方API二维码扫码 · refresh_token自动续期
+
+针对你「穷尽所有方式、也查一下开源有没有更合适的方案」的诉求，把登录/会话恢复做到极致，并对照 bilibili-API-collect、BiliTools、@renmu/bili-api 等开源方案取证取舍。
+
+### 1. 官方 passport API 应用内二维码扫码登录（新增，更稳）
+- 新增「**二维码扫码登录**」按钮：主进程直接调官方 `/x/passport-login/web/qrcode/generate`（返回 `qrcode_key` + `url`）→ 用 `qrcode` 包把 `url` 生成 PNG `data:` URL，渲染层 `<img src=dataURL>` 内联显示，**不依赖 Electron cookie 罐、不写临时文件**，打包后更稳。
+- 轮询 `/x/passport-login/web/qrcode/poll`，状态：`86101` 未扫码 / `86090` 已扫码待确认 / `86038` 过期 / `0` 成功；成功时 `data.cookie_info.cookies` 给出完整 cookie 列表 + `data.refresh_token`，一并落库。
+- 开源取证：bilibili-API-collect 与 BiliTools 均以该接口作为首选登录方式；相对 Electron BrowserWindow 弹窗扫码，应用内 API 扫码不依赖窗口/存储隔离，失败面更小。
+
+### 2. refresh_token 免扫码续期（新增）
+- 账号列表每个账号新增「**续期**」按钮 + 启动自动恢复编排：登录态失效（`nav.code!==0`）但存在 `refresh_token` 时，免重新扫码刷新登录态。
+- 续期链路（与 B 站官方一致）：`GET /x/passport-login/web/cookie/info` 判 `refresh` → 用 B 站官方 **RSA 公钥**对 `refresh_{时间戳}` 做 **RSA-OAEP(SHA-256)** 加密得 `correspondPath` → `GET https://www.bilibili.com/correspond/1/{path}` 解析 `<div id="1-name">` 取 `refresh_csrf` → `POST /x/passport-login/web/cookie/refresh`（新 cookie 在 Set-Cookie 返回）→ `POST /x/passport-login/web/confirm/refresh` 失效旧 token。
+- 开源取证：@renmu/bili-api 等库用相同 RSA-OAEP 方案续期；密码/短信登录在各开源库中普遍被风控拒绝（BiliTools 文档明确「密码登录因风控暂不可用」），故不做。
+
+### 3. Cookie 导入加固 + 启动自动恢复编排
+- 手动导入 Cookie 增加格式/必填字段校验与落库兜底，导入即 `nav` 校验有效性。
+- 应用启动（whenReady 后约 2.5s）遍历账号：登录态失效且存在 refresh_token 则自动续期，成功静默落库（`sendLog('ok',...)`），失败计数并提示重登；最后 `bus:account` 刷新界面。
+
+### 工程
+- 新增 `src/auth.js`：纯 Node 登录协议模块（generateQr / pollQr / getCorrespondPath / parseRefreshCsrf / refreshCookie），所有 HTTP 走内部 `fetchRequest` 便于单测打桩；内嵌 B 站官方 RSA 公钥（PEM）。
+- `src/store.js`：`_normalize` / `load` / `flush` 增加 `refreshToken` 字段，与 cookie 同密级加解密。
+- `main.js`：新增 IPC `account:qrStart / qrPoll / qrCancel / refreshToken`；启动自动恢复编排；`BUILD_TAG` 升 v2.3.0。
+- `preload.js`：暴露 `qrStart / qrPoll / qrCancel / refreshToken`。
+- `renderer/`：`index.html` 顶栏新增「二维码扫码登录」按钮 + 二维码弹窗；`app.js` 接线扫码轮询循环、刷新/取消、账号续期按钮事件委托；`styles.css` 新增弹窗与续期按钮样式。
+- `package.json`：version → 2.3.0，新增生产依赖 `qrcode@^1.5.4`，test 追加 `node test/auth.js`。
+- 测试 **158 项全绿**（新增 `test/auth.js` 11 项：RSA-OAEP 输出格式、refresh_csrf 解析、Set-Cookie 解析、generateQr 返回 dataURL、pollQr 三状态 + 成功返回、refreshCookie 缺 token/refresh=false/完整流程/解析失败、store 加解密 refreshToken）。
+
 ## v2.2.3 三搜索路径可用化 · 公开搜索免登录 · 核对关注状态
 
 针对你「都试试」的诉求，把批量取关的三种找人方式都做扎实；并先厘清一个关键事实：**本机 5 个账号的 cookie 全部 `nav=-101` 过期**，所以当前「搜索/载入/取关都不行」的根因是会话失效（不是布局 bug，那个 v2.2.2 已修；也不是搜索接口坏了，公开搜索本身是通的）。

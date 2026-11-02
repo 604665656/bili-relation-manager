@@ -1,6 +1,6 @@
 {
   "name": "bili-relation-manager",
-  "version": "2.2.3",
+  "version": "2.3.0",
   "description": "B站多账号关注管理台 · 自动取关单向关注 / 自动回粉互粉",
   "main": "main.js",
   "author": "local",
@@ -11,7 +11,7 @@
     "pack": "electron-builder --dir",
     "build": "electron-builder --win --x64",
     "clean:dist": "node tools/clean-dist.js",
-    "test": "node test/smoke.js && node test/engine.js && node test/ui.js && node test/batch.js && node test/search-gate.js"
+    "test": "node test/smoke.js && node test/engine.js && node test/ui.js && node test/batch.js && node test/search-gate.js && node test/auth.js"
   },
   "devDependencies": {
     "electron": "44.9.1",
@@ -62,5 +62,8 @@
     },
     "compression": "maximum",
     "asar": true
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
   }
 }

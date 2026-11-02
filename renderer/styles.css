@@ -235,6 +235,14 @@ textarea { width: 100%; resize: vertical; font-family: inherit; line-height: 1.6
 .mini.danger { color: #ff8a8a; }
 .mini.danger:hover { background: #3a1f24; }
 .ub-ops { white-space: nowrap; }
+.mini.renew { color: #8fd0ff; border-color: #2b4a63; }
+.mini.renew:hover { background: #173042; border-color: #3d6f93; }
+/* 应用内二维码登录弹窗 */
+.qr-box { width: 340px; }
+.qr-body { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.qr-imgwrap { width: 260px; height: 260px; background: #fff; border-radius: 10px; display: flex; align-items: center; justify-content: center; padding: 8px; }
+.qr-imgwrap img { width: 100%; height: 100%; image-rendering: pixelated; }
+.qr-status { font-size: 12px; color: var(--muted); text-align: center; min-height: 16px; }
 
 /* ── 状态栏 ── */
 .statusbar {
