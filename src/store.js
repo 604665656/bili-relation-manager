@@ -108,7 +108,8 @@ const DEFAULT_GLOBAL = {
   followCap: 5000,         // 关注上限保护：关注数达到该值就跳过「自动关注」，防止被 B 站拒绝（普通账号 5000，大会员可调高；0 = 关闭）
   logKeepDays: 14,         // 每日日志文件保留天数（logs/YYYY-MM-DD.log）
   quietHours: '',          // 每日休息时段（RB20）：如 "23:00-08:00"，空 = 不限制
-  restDays: []             // 每周休息日（RB20）：0=周日…6=周六，空 = 不限制
+  restDays: [],            // 每周休息日（RB20）：0=周日…6=周六，空 = 不限制
+  updateMirror: 'auto'     // 热更新下载镜像：'auto'（自动探测最快镜像）/ 'direct'（直连 GitHub）/ 自定义 http(s) 前缀
 };
 
 /** 界面日志保留条数（完整历史在 logs/ 目录的每日文件里） */

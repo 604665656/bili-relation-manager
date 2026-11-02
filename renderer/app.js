@@ -81,7 +81,64 @@ function renderAll() {
 }
 
 /* ─────────── 交互绑定 ─────────── */
+/* ─────────── 侧边栏可拖拽调整宽度 ─────────── */
+function initLayout() {
+  const layout = document.querySelector('.layout');
+  if (!layout) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem('brm-layout') || '{}');
+    if (saved.left) layout.style.setProperty('--left-w', Math.max(200, Math.min(480, saved.left)) + 'px');
+    if (saved.right) layout.style.setProperty('--right-w', Math.max(240, Math.min(620, saved.right)) + 'px');
+  } catch (e) { /* ignore */ }
+  makeResizer('resize-left', 'left');
+  makeResizer('resize-right', 'right');
+}
+function makeResizer(id, side) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const layout = document.querySelector('.layout');
+    if (!layout) return;
+    const startX = e.clientX;
+    const key = side === 'left' ? '--left-w' : '--right-w';
+    const cur = () => {
+      const v = parseFloat(getComputedStyle(layout).getPropertyValue(key));
+      return isNaN(v) ? (side === 'left' ? 268 : 380) : v;
+    };
+    const start = cur();
+    const min = side === 'left' ? 200 : 240;
+    const max = side === 'left' ? 480 : 620;
+    el.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const mv = (ev) => {
+      let w = start + (ev.clientX - startX) * (side === 'left' ? 1 : -1);
+      w = Math.max(min, Math.min(max, w));
+      layout.style.setProperty(key, w + 'px');
+    };
+    const up = () => {
+      document.removeEventListener('mousemove', mv);
+      document.removeEventListener('mouseup', up);
+      el.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      try {
+        const saved = { left: 268, right: 380 };
+        const raw = JSON.parse(localStorage.getItem('brm-layout') || '{}');
+        if (raw.left) saved.left = raw.left;
+        if (raw.right) saved.right = raw.right;
+        saved[side] = parseFloat(getComputedStyle(layout).getPropertyValue(key)) || saved[side];
+        localStorage.setItem('brm-layout', JSON.stringify(saved));
+      } catch (e) { /* ignore */ }
+    };
+    document.addEventListener('mousemove', mv);
+    document.addEventListener('mouseup', up);
+  });
+}
+
 function wireEvents() {
+  initLayout();
   $('#btn-add').onclick = doLogin;
   $('#btn-import').onclick = openImport;
   $('#btn-login-refresh').onclick = () => window.api.loginRefresh();
@@ -429,8 +486,15 @@ async function doDeleteOne() {
 }
 
 async function doSaveGlobal() {
+  const mirrorEl = document.querySelector('input[name=updmirror]:checked');
+  let updateMirror = (mirrorEl && mirrorEl.value) || 'auto';
+  if (updateMirror === 'custom') {
+    const c = String($('#g-mirror-custom').value || '').trim();
+    updateMirror = /^https?:\/\//i.test(c) ? c.replace(/\/+$/, '/') : 'auto';
+  }
   const g = {
     autoStartOnLaunch: $('#g-autostart').checked,
+    updateMirror: updateMirror,
     pageGap: clampInt($('#g-pagegap').value, 300, 60000, 1200),
     whiteList: String($('#g-white').value || '').split(/[\s,，;；\n]+/).filter(Boolean),
     rateThreshold: clampInt($('#g-threshold').value, 0, 100, 15) / 100,
@@ -567,6 +631,12 @@ function fillGlobalForm() {
   $('#g-quiet').value = g.quietHours || '';
   $('#g-restdays').value = (g.restDays || []).join(',');
   $('#g-autostart').checked = !!(g.autoStartOnLaunch);
+  const um = g.updateMirror || 'auto';
+  let mmode = 'auto', mcustom = '';
+  if (um === 'direct') mmode = 'direct';
+  else if (/^https?:\/\//i.test(um)) { mmode = 'custom'; mcustom = um; }
+  $$('input[name=updmirror]').forEach((r) => { if (r.value === mmode) r.checked = true; });
+  const mc = $('#g-mirror-custom'); if (mc) mc.value = mcustom;
   $('#never-count').textContent = `　共 ${(g.neverFollow || []).length} 个`;
 }
 

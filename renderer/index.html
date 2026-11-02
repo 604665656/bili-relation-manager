@@ -40,6 +40,8 @@
       </div>
     </section>
 
+    <div class="resizer" id="resize-left" title="拖动调整侧边栏宽度"></div>
+
     <!-- 中：选中账号配置 -->
     <section class="panel config" id="cfg-panel" hidden>
       <div class="panel-head"><span>任务配置</span><span class="muted" id="cfg-uname"></span></div>
@@ -196,6 +198,17 @@
           <span class="hint">命中休息时段 / 休息日时，自动循环会暂停到窗口结束后再继续（可随时手动停止）。社区经验：留出零动作窗口能显著降低被识别为脚本的概率。</span>
         </div>
         <div class="row col">
+          <label class="lbl">热更新下载镜像（GitHub 国内访问不稳时用于加速更新）</label>
+          <div class="checks">
+            <label class="cb"><input type="radio" name="updmirror" value="auto"> 自动探测</label>
+            <label class="cb"><input type="radio" name="updmirror" value="direct"> 直连 GitHub</label>
+            <label class="cb"><input type="radio" name="updmirror" value="custom"> 自定义前缀</label>
+          </div>
+          <input type="text" id="g-mirror-custom" placeholder="如 https://ghproxy.com/" style="min-width:280px">
+          <span class="hint">默认「自动探测」会逐一测速可用镜像、按最快来源下载更新。也可选「直连」或填自己的代理前缀（需以 / 结尾，例如 https://ghproxy.com/）。</span>
+        </div>
+
+        <div class="row col">
           <label class="lbl">全局白名单 UID（逗号/空格/换行分隔，对所有账号生效）</label>
           <textarea id="g-white" rows="2" placeholder="例如：123456 889900"></textarea>
         </div>
@@ -209,6 +222,8 @@
         </div>
       </div>
     </section>
+
+    <div class="resizer" id="resize-right" title="拖动调整日志面板宽度"></div>
 
     <!-- 右：日志 / 明细 / 统计 -->
     <section class="panel logs">

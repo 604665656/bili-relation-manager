@@ -19,7 +19,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-02 批量取关+筛选 v2.1.16';
+const BUILD_TAG = '2026-11-02 侧边栏可拖拽·更新镜像加速 v2.1.17';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -439,6 +439,7 @@ function registerIPC() {
   ipcMain.handle('global:update', safe('global:update', (p) => {
     const g = store.updateGlobal(p && p.g);
     startStatTimer();                 // 刷新间隔可能变了，重启定时器
+    if (updater) updater.setMirror(g.updateMirror || 'auto');  // 热更新镜像随全局设置实时生效
     return { global: g };
   }));
 
@@ -896,6 +897,8 @@ app.whenReady().then(async () => {
 
   // 热更新：事件统一转发给渲染进程（available/progress/status/error/none）
   updater = new Updater({ onEvent: (ev) => sendUpdater(ev) });
+  // v2.1.17：按全局设置选择更新镜像（默认自动探测最快镜像加速）
+  try { updater.setMirror((store.get().global || {}).updateMirror || 'auto'); } catch (e) { /* ignore */ }
 
   // 自检模式：不起界面，验证主进程各模块可正常装载（打包后可用 EXE --selftest 验证完整性）
   if (process.argv.includes('--selftest')) {
