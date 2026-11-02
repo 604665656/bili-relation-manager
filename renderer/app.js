@@ -9,10 +9,13 @@ const ST = { accounts: [], global: {}, selected: null, records: [], logs: [], bu
 /* 批量取关（一键取关 + 筛选）的临时状态（不落盘） */
 const BATCH = {
   mode: 'search',     // 'search' | 'follow'
-  items: [],          // 原始候选 { mid, uname, fans, attribute, selected, result, detail }
+  items: [],          // 原始候选 { mid, uname, fans, attribute, face, sign, selected, result, detail, _activity }
   filtered: [],       // 过滤后（引用 items）
+  profiles: {},       // mid -> { lastPubdate, archiveCount, activity, activityLabel, activityDays }
   loading: false,
   executing: false,
+  enriching: false,
+  enrichReqId: 0,
   reqId: 0            // 防止过期搜索/载入响应覆盖最新结果
 };
 
@@ -230,14 +233,17 @@ function wireEvents() {
   $('#btn-batch-search').onclick = doBatchSearch;
   $('#btn-batch-load').onclick = doBatchLoad;
   $('#batch-keyword').addEventListener('keydown', (e) => { if (e.key === 'Enter') doBatchSearch(); });
-  ['#batch-filter-kw', '#batch-only-oneway', '#batch-only-following', '#batch-minfans', '#batch-maxfans']
-    .forEach((sel) => $(sel).addEventListener('input', applyBatchFiltersLive));
+  ['#batch-filter-kw', '#batch-only-oneway', '#batch-only-following', '#batch-minfans', '#batch-maxfans',
+   '#batch-activity', '#batch-lastpost', '#batch-minlevel', '#batch-hassign']
+    .forEach((sel) => { const el = $(sel); if (el) el.addEventListener('input', applyBatchFiltersLive); });
+  $('#btn-batch-enrich').onclick = doBatchEnrich;
   $('#batch-selall').onclick = onBatchSelAll;
   $('#btn-batch-unfollow').onclick = openBatchConfirm;
   $('#btn-batch-confirm-ok').onclick = doBatchUnfollow;
   $('#btn-batch-confirm-cancel').onclick = () => hideEl($('#modal-batch'));
   $('#modal-batch').onclick = (e) => { if (e.target === $('#modal-batch')) hideEl($('#modal-batch')); };
   if (window.api.onUnfollowProgress) window.api.onUnfollowProgress(onUnfollowProgress);
+  if (window.api.onUnfollowEnrich) window.api.onUnfollowEnrich(onUnfollowEnrich);
 }
 
 function readCfgForm() {
@@ -793,6 +799,18 @@ function relClass(attr) {
   return 'res-skip';
 }
 function cssEscape(s) { return String(s).replace(/["\\]/g, '\\$&'); }
+/** 渲染进程本地版活跃度分类（与 src/batch-unfollow.js 的 classifyActivity 语义一致） */
+function activityOf(it) {
+  if (it && it._activity) return it._activity;
+  const now = Math.floor(Date.now() / 1000);
+  const last = (it && typeof it.lastPubdate === 'number') ? it.lastPubdate : null;
+  const count = (it && typeof it.archiveCount === 'number') ? it.archiveCount : 0;
+  if (!count || !last) return { key: 'never', days: null, label: '从未投稿' };
+  const days = Math.floor((now - last) / 86400);
+  if (days <= 90) return { key: 'active', days, label: `活跃（${days}天前投稿）` };
+  if (days <= 365) return { key: 'occasional', days, label: `偶尔（${days}天前）` };
+  return { key: 'dormant', days, label: `沉寂（${days}天前）` };
+}
 function removeBatchBar() {
   hideEl($('#batch-prog'));   // 仅隐藏，保留静态元素（ui 单测要求 id 存在于 HTML）
 }
@@ -828,7 +846,12 @@ async function doBatchSearch() {
   if (reqId !== BATCH.reqId) return;   // 过期响应（用户已切模式/重新搜索）直接丢弃
   BATCH.loading = false; setBatchBusy(false);
   if (!r || !r.ok) { setStatus('搜索失败：' + ((r && r.error) || '未知')); return toast('搜索失败：' + ((r && r.error) || '未知')); }
-  BATCH.items = (r.list || []).map((it) => Object.assign({}, it, { selected: false, result: '', detail: '' }));
+  BATCH.items = (r.list || []).map((it) => {
+    const o = Object.assign({}, it, { selected: false, result: '', detail: '' });
+    const p = BATCH.profiles[String(it.mid)];
+    if (p && p._activity) o._activity = p._activity;
+    return o;
+  });
   applyBatchFilters();
   setStatus(`搜索「${kw}」返回 ${BATCH.items.length} 人，筛选后展示 ${BATCH.filtered.length} 人`);
   toast(`搜索到 ${BATCH.items.length} 人`);
@@ -845,7 +868,12 @@ async function doBatchLoad() {
   if (reqId !== BATCH.reqId) return;
   BATCH.loading = false; setBatchBusy(false);
   if (!r || !r.ok) { setStatus('载入失败：' + ((r && r.error) || '未知')); return toast('载入失败：' + ((r && r.error) || '未知')); }
-  BATCH.items = (r.list || []).map((it) => Object.assign({}, it, { selected: false, result: '', detail: '' }));
+  BATCH.items = (r.list || []).map((it) => {
+    const o = Object.assign({}, it, { selected: false, result: '', detail: '' });
+    const p = BATCH.profiles[String(it.mid)];
+    if (p && p._activity) o._activity = p._activity;
+    return o;
+  });
   applyBatchFilters();
   setStatus(`已载入关注 ${BATCH.items.length} 人（共 ${r.total} 关注），筛选后展示 ${BATCH.filtered.length} 人`);
   toast(`载入 ${BATCH.items.length} 人`);
@@ -853,12 +881,76 @@ async function doBatchLoad() {
 
 function applyBatchFiltersLive() { applyBatchFilters(); }
 
+/** 对当前筛选后的候选批量分析「昵称画像 + 活跃度（最近投稿）」 */
+async function doBatchEnrich() {
+  if (!ST.selected) return toast('请先选中一个账号');
+  if (!BATCH.items.length) return toast('请先载入 / 搜索名单');
+  const targets = (BATCH.filtered.length ? BATCH.filtered : BATCH.items).map((it) => String(it.mid));
+  if (!targets.length) return toast('当前没有可分析的账号');
+  const myReq = ++BATCH.enrichReqId;
+  BATCH.enriching = true; setBatchBusy(true);
+  const eb = $('#btn-batch-enrich'); if (eb) eb.disabled = true;
+  showEl($('#batch-enrich-prog'));
+  $('#batch-enrich-prog').querySelector('i').style.width = '0%';
+  $('#batch-enrich-txt').textContent = `准备分析 ${targets.length} 人…`;
+  setStatus(`正在分析 ${targets.length} 个账号的活跃度与画像（逐个查询空间，请稍候）…`);
+  let r;
+  try { r = await window.api.unfollowEnrich(ST.selected, targets); }
+  catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+  if (myReq !== BATCH.enrichReqId) return;   // 已被新一轮替代
+  BATCH.enriching = false; setBatchBusy(false);
+  if (eb) eb.disabled = false;
+  if (!r || !r.ok) { setStatus('画像分析失败：' + ((r && r.error) || '未知')); return toast('分析失败：' + ((r && r.error) || '未知')); }
+  const profs = r.profiles || {};
+  for (const mid of Object.keys(profs)) {
+    const p = profs[mid];
+    BATCH.profiles[mid] = {
+      lastPubdate: p.lastPubdate, archiveCount: p.archiveCount,
+      activity: p.activity, activityLabel: p.activityLabel, activityDays: p.activityDays,
+      _activity: { key: p.activity, days: p.activityDays, label: p.activityLabel }
+    };
+    const it = BATCH.items.find((x) => String(x.mid) === String(mid));
+    if (it) it._activity = BATCH.profiles[mid]._activity;
+  }
+  applyBatchFilters();
+  const n = Object.keys(profs).length;
+  setStatus(`画像分析完成：${n} 人；活跃度已标注（活跃 / 偶尔 / 沉寂 / 从未投稿）。可叠加筛选后一键取关。`);
+  toast(`分析完成 ${n} 人`);
+  setTimeout(() => hideEl($('#batch-enrich-prog')), 1500);
+}
+
+/** 富集进度（只读，不写操作） */
+async function onUnfollowEnrich(ev) {
+  if (!ev || !ev.type) return;
+  const bar = $('#batch-enrich-prog');
+  if (!bar) return;
+  if (ev.type === 'start') {
+    showEl(bar); bar.querySelector('i').style.width = '0%';
+    $('#batch-enrich-txt').textContent = `0 / ${ev.total}`;
+    return;
+  }
+  if (ev.type === 'item') {
+    const pct = ev.total ? Math.round((ev.done / ev.total) * 100) : 0;
+    bar.querySelector('i').style.width = pct + '%';
+    $('#batch-enrich-txt').textContent = `分析活跃度 ${ev.done} / ${ev.total}（成功 ${ev.ok} · 失败 ${ev.fail}）`;
+    return;
+  }
+  if (ev.type === 'done') {
+    bar.querySelector('i').style.width = '100%';
+    $('#batch-enrich-txt').textContent = `完成：成功 ${ev.ok} · 失败 ${ev.fail}`;
+  }
+}
+
 function applyBatchFilters() {
   const kw = $('#batch-filter-kw').value;
   const onlyOneWay = $('#batch-only-oneway').checked;
   const onlyFollowing = $('#batch-only-following').checked;
   const minFans = $('#batch-minfans').value;
   const maxFans = $('#batch-maxfans').value;
+  const activity = $('#batch-activity') ? $('#batch-activity').value : '';
+  const lastPostWithin = $('#batch-lastpost') ? Number($('#batch-lastpost').value) : NaN;
+  const minLevel = $('#batch-minlevel') ? Number($('#batch-minlevel').value) : 0;
+  const needSign = $('#batch-hassign') ? $('#batch-hassign').checked : false;
   // 与主进程 batch-unfollow.js 同一套语义（渲染进程无 node，这里本地实现精简版）
   BATCH.filtered = BATCH.items.filter((it) => {
     if (kw) {
@@ -874,6 +966,14 @@ function applyBatchFilters() {
     }
     if (minFans !== '' && !Number.isNaN(Number(minFans)) && Number(it.fans || 0) < Number(minFans)) return false;
     if (maxFans !== '' && !Number.isNaN(Number(maxFans)) && Number(it.fans || 0) > Number(maxFans)) return false;
+    // 活跃度分级
+    const act = activityOf(it);
+    if (activity && act.key !== activity) return false;
+    if (!Number.isNaN(lastPostWithin) && lastPostWithin > 0) {
+      if (act.days == null || act.days > lastPostWithin) return false;
+    }
+    if (!Number.isNaN(minLevel) && minLevel > 0 && Number(it.level || 0) < minLevel) return false;
+    if (needSign && !(it.sign && String(it.sign).trim())) return false;
     return true;
   });
   renderBatch();
@@ -890,29 +990,49 @@ function renderBatch() {
   if (!a) { box.innerHTML = '<p class="muted" style="padding:10px">请先登录并选中一个账号</p>'; updateBatchCounts(); return; }
   $('#batch-acc-hint').textContent = `当前账号：${a.uname}`;
   if (!BATCH.items.length) {
-    box.innerHTML = '<p class="muted" style="padding:10px">选择上方模式并加载名单后，这里会列出可批量取关的对象。取关前会二次确认并预览名单。</p>';
+    box.innerHTML = '<p class="muted" style="padding:12px">选择上方模式并「加载 / 搜索」后，这里会列出可批量取关的对象。' +
+      '建议：先用「我的关注列表 → 载入我的关注」穷举所有单向关注，再点「分析画像 / 活跃度」获取昵称画像与最近投稿情况。</p>';
     updateBatchCounts();
     return;
   }
   const rows = BATCH.filtered;
   if (!rows.length) {
-    box.innerHTML = '<p class="muted" style="padding:10px">当前筛选条件下没有可显示的对象，放宽条件试试。</p>';
+    box.innerHTML = '<p class="muted" style="padding:12px">当前筛选条件下没有可显示的对象，放宽条件试试。</p>';
     updateBatchCounts();
     return;
   }
-  let h = '<table><tr><th class="cbs"></th><th>昵称</th><th>UID</th><th>粉丝数</th><th>关系</th><th>状态</th></tr>';
+  const oneWay = BATCH.items.filter((it) => {
+    const attr = (typeof it.attribute === 'number') ? it.attribute : null;
+    return attr !== null && (attr & 2) && !(attr & 4);
+  }).length;
+  const analyzed = Object.keys(BATCH.profiles).length;
+  let h = `<div class="bsum">可一键取关（单向关注）：<b>${oneWay}</b> 人 · 已分析画像：<b>${analyzed}</b> / ${BATCH.items.length} 人</div>`;
+  h += '<div class="bgrid">';
   for (const it of rows) {
     const canPick = !BATCH.executing;
-    h += `<tr data-mid="${escapeAttr(it.mid)}">` +
-      `<td class="cbs"><input type="checkbox" class="bchk" data-mid="${escapeAttr(it.mid)}" ${it.selected ? 'checked' : ''} ${canPick ? '' : 'disabled'}></td>` +
-      `<td>${escapeHtml(it.uname || '')}</td>` +
-      `<td>${escapeHtml(String(it.mid))}</td>` +
-      `<td>${it.fans == null ? '—' : fmtNum(it.fans)}</td>` +
-      `<td class="${relClass(it.attribute)}">${relText(it.attribute)}</td>` +
-      `<td class="bstatus">${it.result ? escapeHtml(it.result) + (it.detail ? ' · ' + escapeHtml(it.detail) : '') : ''}</td>` +
-      `</tr>`;
+    const act = activityOf(it);
+    const faceUrl = it.face || '';
+    const initial = escapeHtml((it.uname || '?').slice(0, 1));
+    const avatar = faceUrl
+      ? `<img class="bavatar" src="${escapeAttr(faceUrl)}" alt="" onerror="this.style.display='none'">`
+      : `<div class="bavatar bavatar-ph">${initial}</div>`;
+    h += `<div class="bcard" data-mid="${escapeAttr(it.mid)}">` +
+      `<label class="bchkwrap"><input type="checkbox" class="bchk" data-mid="${escapeAttr(it.mid)}" ${it.selected ? 'checked' : ''} ${canPick ? '' : 'disabled'}></label>` +
+      avatar +
+      `<div class="bmeta">` +
+        `<div class="bname">${escapeHtml(it.uname || '')} <span class="buid">${escapeHtml(String(it.mid))}</span></div>` +
+        `<div class="bpills">` +
+          `<span class="pill ${relClass(it.attribute)}">${relText(it.attribute)}</span>` +
+          `<span class="pill fans">粉丝 ${it.fans == null ? '—' : fmtNum(it.fans)}</span>` +
+          `<span class="pill act-${act.key}">${escapeHtml(act.label)}</span>` +
+        `</div>` +
+        (it.sign ? `<div class="bsign">${escapeHtml(String(it.sign).slice(0, 60))}</div>` : '') +
+        (it.result ? `<div class="bstatus ${/已取关/.test(it.result) ? 'res-ok' : /失败/.test(it.result) ? 'res-fail' : 'res-skip'}">${escapeHtml(it.result)}${it.detail ? ' · ' + escapeHtml(it.detail) : ''}</div>` : '') +
+      `</div>` +
+    `</div>`;
   }
-  box.innerHTML = h + '</table>';
+  h += '</div>';
+  box.innerHTML = h;
   box.querySelectorAll('.bchk').forEach((cb) => {
     cb.onchange = () => {
       const it = BATCH.filtered.find((x) => String(x.mid) === String(cb.dataset.mid));
@@ -930,6 +1050,8 @@ function updateBatchCounts() {
   const btn = $('#btn-batch-unfollow');
   btn.textContent = `一键取关（${sel}）`;
   btn.disabled = sel === 0 || BATCH.loading || BATCH.executing;
+  const eb = $('#btn-batch-enrich');
+  if (eb) eb.disabled = total === 0 || BATCH.loading || BATCH.executing || BATCH.enriching;
 }
 
 function onBatchSelAll(e) {
@@ -942,11 +1064,12 @@ function openBatchConfirm() {
   const sel = BATCH.filtered.filter((x) => x.selected);
   if (!sel.length) return;
   $('#batch-confirm-n').textContent = sel.length;
-  let h = '<table><tr><th>昵称</th><th>UID</th><th>关系</th></tr>';
+  let h = '<table><tr><th>昵称</th><th>UID</th><th>关系</th><th>活跃度</th></tr>';
   for (const it of sel.slice(0, 30)) {
-    h += `<tr><td>${escapeHtml(it.uname || '')}</td><td>${escapeHtml(String(it.mid))}</td><td>${relText(it.attribute)}</td></tr>`;
+    const act = activityOf(it);
+    h += `<tr><td>${escapeHtml(it.uname || '')}</td><td>${escapeHtml(String(it.mid))}</td><td>${relText(it.attribute)}</td><td>${escapeHtml(act.label)}</td></tr>`;
   }
-  if (sel.length > 30) h += `<tr><td colspan="3" class="muted">… 其余 ${sel.length - 30} 人略</td></tr>`;
+  if (sel.length > 30) h += `<tr><td colspan="4" class="muted">… 其余 ${sel.length - 30} 人略</td></tr>`;
   h += '</table>';
   $('#batch-confirm-list').innerHTML = h;
   $('#batch-confirm-msg').textContent = '';
@@ -985,7 +1108,7 @@ async function onUnfollowProgress(ev) {
     return;
   }
   if (ev.type === 'item') {
-    const row = box.querySelector(`tr[data-mid="${cssEscape(ev.mid)}"]`);
+    const row = box.querySelector(`.bcard[data-mid="${cssEscape(ev.mid)}"]`);
     if (row) {
       const cls = /已取关/.test(ev.result) ? 'res-ok' : /失败/.test(ev.result) ? 'res-fail' : 'res-skip';
       const cell = row.querySelector('.bstatus');

@@ -269,7 +269,7 @@
         <!-- 我的关注列表模式 -->
         <div class="batch-row" id="batch-follow-row" hidden>
           <button class="btn primary small" id="btn-batch-load">载入我的关注</button>
-          <span class="muted">载入「我的关注」前 1000 条并自动标记「不互关」；粉丝数区间筛选请使用「关键字搜索」模式</span>
+          <span class="muted">载入「我的关注」前 1000 条并自动标记「不互关」；可点右侧「分析画像 / 活跃度」获取对方昵称画像与最近投稿情况。</span>
         </div>
 
         <!-- 筛选器 -->
@@ -283,6 +283,21 @@
             <input type="number" id="batch-maxfans" placeholder="最大" min="0" style="width:76px">
             <span class="muted" id="batch-fans-note"></span>
           </span>
+          <span class="sep"></span>
+          <label class="lbl">活跃度</label>
+          <select id="batch-activity">
+            <option value="">全部</option>
+            <option value="active">活跃（90 天内投稿）</option>
+            <option value="occasional">偶尔（90~365 天）</option>
+            <option value="dormant">沉寂（超 1 年）</option>
+            <option value="never">从未投稿</option>
+          </select>
+          <label class="cb small">最近投稿 ≤
+            <input type="number" id="batch-lastpost" placeholder="天" min="0" style="width:60px"> 天</label>
+          <label class="cb small">等级 ≥
+            <input type="number" id="batch-minlevel" placeholder="0" min="0" style="width:48px"></label>
+          <label class="cb small"><input type="checkbox" id="batch-hassign"> 有简介</label>
+          <button class="btn accent small" id="btn-batch-enrich" disabled>分析画像 / 活跃度</button>
         </div>
 
         <!-- 操作条 -->
@@ -293,11 +308,15 @@
           <button class="btn danger small" id="btn-batch-unfollow" disabled>一键取关（0）</button>
         </div>
 
+        <div class="batch-prog" id="batch-enrich-prog" hidden>
+          <div class="batch-bar"><i style="width:0%"></i></div>
+          <span class="muted" id="batch-enrich-txt"></span>
+        </div>
         <div class="batch-prog" id="batch-prog" hidden>
           <div class="batch-bar"><i style="width:0%"></i></div>
           <span class="muted" id="batch-prog-txt"></span>
         </div>
-        <div class="recbox" id="batchbox">
+        <div id="batchbox" class="batchbox">
           <p class="muted" style="padding:10px">选择上方模式并加载名单后，这里会列出可批量取关的对象。取关前会二次确认并预览名单。</p>
         </div>
       </div>

@@ -8,7 +8,7 @@ const { Store } = require('./src/store');
 const { BiliClient, sleep } = require('./src/bilibili');
 const { Engine, sourceLabel, accountsToAutoStart } = require('./src/task');
 const { Updater } = require('./src/updater');
-const { canUnfollow } = require('./src/batch-unfollow');
+const { canUnfollow, classifyActivity } = require('./src/batch-unfollow');
 
 /** 数值范围钳制（main 内多处复用，统一放这里） */
 function clampNum(v, lo, hi, dft) {
@@ -19,7 +19,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-02 侧边栏可拖拽·更新镜像加速 v2.1.17';
+const BUILD_TAG = '2026-11-02 粉丝画像·活跃度分析·一键取关 v2.2.0';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -514,6 +514,11 @@ function registerIPC() {
       try { mainWindow.webContents.send('bus:unfollowProgress', payload); } catch (e) { /* ignore */ }
     }
   }
+  function sendUnfollowEnrich(payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('bus:unfollowEnrich', payload); } catch (e) { /* ignore */ }
+    }
+  }
 
   /** 关键字搜索：返回带 粉丝数 + 关系位 的用户列表（批量取关的筛选数据源之一） */
   ipcMain.handle('unfollow:search', safe('unfollow:search', async (p) => {
@@ -571,7 +576,9 @@ function registerIPC() {
       for (const it of (j.data.list || [])) {
         list.push({
           mid: String(it.mid), uname: it.uname || '',
-          fans: null, // 关注列表接口不返回对方粉丝数；粉丝数区间筛选请在「关键字搜索」模式使用
+          face: (it.face) ? String(it.face) : null,
+          sign: (it.sign) ? String(it.sign) : null,
+          fans: (typeof it.fans === 'number') ? it.fans : null,
           attribute: (typeof it.attribute === 'number') ? it.attribute : null
         });
       }
@@ -651,6 +658,50 @@ function registerIPC() {
     try { store.flush(); } catch (e) { /* ignore */ }
     sendUnfollowProgress({ type: 'done', total, done, ok, fail, skip });
     return { ok: true, total, done, okCount: ok, fail, skip };
+  }));
+
+  /**
+   * 画像/活跃度分析：对传入的一批 UID 逐个查询「最近投稿」与「空间资料」，
+   * 计算活跃度分级，节流推送进度，返回 mid → 画像 映射。只读取、不做写操作。
+   */
+  ipcMain.handle('unfollow:enrich', safe('unfollow:enrich', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const mids = Array.isArray(p && p.mids) ? p.mids.map(String).filter(Boolean) : [];
+    if (!mids.length) return { ok: false, error: '分析名单为空' };
+    const client = new BiliClient(acc.cookie);
+    if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
+    const nav = await client.nav();
+    if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
+    const gap = clampNum((p && p.gap) || store.get().global.pageGap || 1200, 500, 600000);
+    const total = mids.length;
+    const out = {};
+    sendUnfollowEnrich({ type: 'start', total });
+    let done = 0, okCount = 0, fail = 0;
+    for (const mid of mids) {
+      try {
+        const rv = await client.recentVideo(mid);
+        const act = classifyActivity(rv.latestPubdate, rv.count);
+        out[mid] = {
+          mid,
+          lastPubdate: rv.latestPubdate,
+          archiveCount: rv.count,
+          activity: act.key,
+          activityLabel: act.label,
+          activityDays: act.days
+        };
+        okCount++;
+      } catch (e) {
+        fail++;
+        out[mid] = { mid, lastPubdate: null, archiveCount: 0, activity: 'unknown', activityLabel: '活跃度未知', activityDays: null };
+      }
+      done++;
+      sendUnfollowEnrich({ type: 'item', mid, done, total, ok: okCount, fail });
+      if (done < total) await sleep(gap);
+    }
+    sendUnfollowEnrich({ type: 'done', total, done, ok: okCount, fail });
+    return { ok: true, profiles: out, total, ok: okCount, fail };
   }));
 
   // ── 热更新 ──

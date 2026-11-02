@@ -3,7 +3,7 @@
 const assert = require('assert');
 const {
   MUTUAL, FOLLOWED, iFollow, followsMe, isMutual,
-  computeOneWay, filterCandidates, canUnfollow
+  classifyActivity, computeOneWay, filterCandidates, canUnfollow
 } = require('../src/batch-unfollow');
 
 let pass = 0, fail = 0;
@@ -70,6 +70,52 @@ t('多条件叠加：不互关 + 粉丝≥100', () => {
   ];
   const r = filterCandidates(list, { onlyOneWay: true, minFans: 100 });
   assert.deepStrictEqual(r.map((x) => x.mid), [2]);
+});
+
+console.log('\n[批量取关：classifyActivity 活跃度分级]');
+const NOW = 1700000000;  // 固定基准时间，避免跨日波动
+const D = 86400;
+t('从未投稿（count=0）→ never', () => {
+  assert.strictEqual(classifyActivity(null, 0, NOW).key, 'never');
+});
+t('90 天内投稿 → active（含天数）', () => {
+  const a = classifyActivity(NOW - 10 * D, 5, NOW);
+  assert.strictEqual(a.key, 'active');
+  assert.strictEqual(a.days, 10);
+});
+t('90~365 天 → occasional', () => {
+  assert.strictEqual(classifyActivity(NOW - 100 * D, 5, NOW).key, 'occasional');
+});
+t('超 1 年 → dormant', () => {
+  assert.strictEqual(classifyActivity(NOW - 400 * D, 5, NOW).key, 'dormant');
+});
+
+console.log('\n[批量取关：filterCandidates 活跃度/等级/简介]');
+const mkA = (mid, attr, extra) => Object.assign(mk(mid, 'u' + mid, 100, attr), extra);
+t('按活跃度分级过滤（active / never）', () => {
+  const list = [
+    mkA(1, F, { lastPubdate: NOW - 10 * D, archiveCount: 5, _activity: classifyActivity(NOW - 10 * D, 5, NOW) }),
+    mkA(2, F, { lastPubdate: NOW - 400 * D, archiveCount: 5, _activity: classifyActivity(NOW - 400 * D, 5, NOW) }),
+    mkA(3, F, { lastPubdate: null, archiveCount: 0, _activity: classifyActivity(null, 0, NOW) })
+  ];
+  assert.deepStrictEqual(filterCandidates(list, { activity: 'active' }).map((x) => x.mid), [1]);
+  assert.deepStrictEqual(filterCandidates(list, { activity: 'never' }).map((x) => x.mid), [3]);
+});
+t('最近投稿 ≤ N 天（从未投稿者被排除）', () => {
+  const list = [
+    mkA(1, F, { _activity: classifyActivity(NOW - 10 * D, 5, NOW) }),
+    mkA(2, F, { _activity: classifyActivity(NOW - 100 * D, 5, NOW) }),
+    mkA(3, F, { _activity: classifyActivity(null, 0, NOW) })
+  ];
+  assert.deepStrictEqual(filterCandidates(list, { lastPostWithinDays: 30 }).map((x) => x.mid), [1]);
+});
+t('等级下限 minLevel', () => {
+  const list = [mkA(1, F, { level: 4 }), mkA(2, F, { level: 6 })];
+  assert.deepStrictEqual(filterCandidates(list, { minLevel: 5 }).map((x) => x.mid), [2]);
+});
+t('有简介 hasSign', () => {
+  const list = [mkA(1, F, { sign: 'hello' }), mkA(2, F, { sign: '' })];
+  assert.deepStrictEqual(filterCandidates(list, { hasSign: true }).map((x) => x.mid), [1]);
 });
 
 console.log('\n[批量取关：computeOneWay]');

@@ -310,6 +310,48 @@ class BiliClient {
     return (attr & 4) !== 0;
   }
 
+  /* ---------------- 空间资料 / 活跃度 ---------------- */
+  /**
+   * 用户空间资料（昵称画像）：头像 / 简介 / 等级 / 粉丝数 / 投稿数 / 认证。
+   * 用于「批量取关」里给候选账号做画像展示。失败时返回 null。
+   */
+  async spaceProfile(vmid) {
+    await this.getWbiKeys();
+    const q = await this.signParams({ mid: vmid });
+    const j = await this.request('https://api.bilibili.com/x/space/acc/info?' + q, {
+      referer: `https://space.bilibili.com/${vmid}/`
+    });
+    if (!j || j.code !== 0 || !j.data) return null;
+    const d = j.data;
+    return {
+      name: d.name || '',
+      face: normUrl(d.face),
+      sign: d.sign || '',
+      level: Number(d.level) || 0,
+      fans: (typeof d.fans === 'number') ? d.fans : null,
+      archiveCount: (typeof d.archive_count === 'number') ? d.archive_count : null,
+      official: (d.official_verify && d.official_verify.desc) ? d.official_verify.desc : ''
+    };
+  }
+
+  /**
+   * 最近投稿情况：取按发布时间倒序的第 1 条，返回总投稿数与最近投稿时间（unix 秒）。
+   * 用于判断「活跃度 / 最近有没有投稿」。失败返回 { count:0, latestPubdate:null }。
+   */
+  async recentVideo(vmid) {
+    await this.ensureBuvid();
+    await this.getWbiKeys();
+    const q = await this.signParams({ mid: vmid, order: 'pubdate', pn: 1, ps: 1 });
+    const j = await this.request('https://api.bilibili.com/x/space/wbi/arc/search?' + q, {
+      referer: `https://space.bilibili.com/${vmid}/video`
+    });
+    if (!j || j.code !== 0 || !j.data) return { count: 0, latestPubdate: null };
+    const count = (j.data.page && Number(j.data.page.count)) || 0;
+    const list = (j.data.list && j.data.list.vlist) || [];
+    const latest = list.length ? Number(list[0].pubdate) || null : null;
+    return { count, latestPubdate: latest };
+  }
+
   /* ---------------- 写操作 ---------------- */
   /**
    * @param {number} fid 目标 UID

@@ -49,6 +49,12 @@ contextBridge.exposeInMainWorld('api', {
     delayMin: opts && opts.delayMin, delayMax: opts && opts.delayMax
   }),
   onUnfollowProgress: (cb) => subscribe('bus:unfollowProgress', cb),
+  unfollowEnrich: (id, mids, opts) => invoke('unfollow:enrich', {
+    id: String(id || ''),
+    mids: Array.isArray(mids) ? mids : [],
+    gap: opts && opts.gap
+  }),
+  onUnfollowEnrich: (cb) => subscribe('bus:unfollowEnrich', cb),
 
   updaterCheck: () => invoke('updater:check'),
   updaterInfo: () => invoke('updater:info'),
