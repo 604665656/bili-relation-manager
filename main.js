@@ -19,7 +19,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-02 粉丝画像·活跃度分析·一键取关 v2.2.0';
+const BUILD_TAG = '2026-11-02 批量取关健壮性修复 · 错误可见 · 布局防塌缩 v2.2.1';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -533,11 +533,15 @@ function registerIPC() {
     if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
     const maxPages = clampNum((p && p.maxPages) || 3, 1, 20);
     const list = [];
+    let lastErr = null;
     for (let pn = 1; pn <= maxPages; pn++) {
       const j = await searchWithRetryMain(client, keyword, pn, id);
       if (!j || j.code !== 0) {
-        if (j && (j.code === -352 || j.code === -101)) break;
-        break;
+        lastErr = (j && j.message) || '搜索失败';
+        // 首屏就失败：直接返回错误，不再静默返回空列表让界面误判为「无结果」
+        if (pn === 1) return { ok: false, error: lastErr, list: [] };
+        // 中途某页失败：保留已采集部分并提示，避免丢失前几页数据
+        return { ok: true, list, total: list.length, warning: `第 ${pn} 页起请求失败（${lastErr}），已展示前 ${list.length} 条` };
       }
       for (const it of (j.list || [])) {
         list.push({
@@ -565,12 +569,15 @@ function registerIPC() {
     // 这里最多读 20 页（1000 条），与「取关名单」监控口径一致，覆盖绝大多数账号
     const maxPages = clampNum((p && p.maxPages) || 20, 1, 20);
     const list = [];
-    let pn = 1, total = Infinity;
+    let pn = 1, total = Infinity, lastErr = null;
     while (pn <= maxPages && (pn - 1) * 50 < total) {
       const j = await client.followings(pn, 50, client.mid, '');
       if (!j || j.code !== 0) {
-        if (j && (j.code === -352 || j.code === -101)) break;
-        break;
+        lastErr = (j && j.message) || '载入关注失败';
+        // 首屏就失败：直接返回错误，不再静默返回空列表让界面误判为「无结果」
+        if (pn === 1) return { ok: false, error: lastErr, list: [] };
+        // 中途某页失败：保留已采集部分并提示，避免丢失前几页数据
+        return { ok: true, list, total: list.length, warning: `第 ${pn} 页起请求失败（${lastErr}），已展示前 ${list.length} 条` };
       }
       if (typeof j.data.total === 'number') total = j.data.total;
       for (const it of (j.data.list || [])) {

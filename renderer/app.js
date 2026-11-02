@@ -85,16 +85,28 @@ function renderAll() {
 
 /* ─────────── 交互绑定 ─────────── */
 /* ─────────── 侧边栏可拖拽调整宽度 ─────────── */
+/* 侧栏宽度按窗口比例动态钳制，保证中栏永不被挤成 0 宽（否则 CJK 文字会逐字竖排） */
+function maxLeftForWin() { return Math.max(200, Math.min(480, Math.floor(window.innerWidth * 0.32))); }
+function maxRightForWin() { return Math.max(240, Math.min(620, Math.floor(window.innerWidth * 0.42))); }
 function initLayout() {
   const layout = document.querySelector('.layout');
   if (!layout) return;
   try {
     const saved = JSON.parse(localStorage.getItem('brm-layout') || '{}');
-    if (saved.left) layout.style.setProperty('--left-w', Math.max(200, Math.min(480, saved.left)) + 'px');
-    if (saved.right) layout.style.setProperty('--right-w', Math.max(240, Math.min(620, saved.right)) + 'px');
+    if (saved.left) layout.style.setProperty('--left-w', Math.max(200, Math.min(maxLeftForWin(), saved.left)) + 'px');
+    if (saved.right) layout.style.setProperty('--right-w', Math.max(240, Math.min(maxRightForWin(), saved.right)) + 'px');
   } catch (e) { /* ignore */ }
   makeResizer('resize-left', 'left');
   makeResizer('resize-right', 'right');
+  // 窗口缩放时重新钳制，避免中栏塌缩
+  window.addEventListener('resize', () => {
+    const layout = document.querySelector('.layout');
+    if (!layout) return;
+    const lv = parseFloat(getComputedStyle(layout).getPropertyValue('--left-w'));
+    const rv = parseFloat(getComputedStyle(layout).getPropertyValue('--right-w'));
+    if (!Number.isNaN(lv) && lv > maxLeftForWin()) layout.style.setProperty('--left-w', maxLeftForWin() + 'px');
+    if (!Number.isNaN(rv) && rv > maxRightForWin()) layout.style.setProperty('--right-w', maxRightForWin() + 'px');
+  });
 }
 function makeResizer(id, side) {
   const el = document.getElementById(id);
@@ -111,7 +123,7 @@ function makeResizer(id, side) {
     };
     const start = cur();
     const min = side === 'left' ? 200 : 240;
-    const max = side === 'left' ? 480 : 620;
+    const max = side === 'left' ? maxLeftForWin() : maxRightForWin();
     el.classList.add('dragging');
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
@@ -815,6 +827,23 @@ function removeBatchBar() {
   hideEl($('#batch-prog'));   // 仅隐藏，保留静态元素（ui 单测要求 id 存在于 HTML）
 }
 
+/** 批量取关面板内的加载态（带转圈），替代无反馈的「一直转圈」 */
+function setBatchLoading(msg) {
+  const box = $('#batchbox');
+  if (box) box.innerHTML = `<div class="batch-msg"><span class="spinner"></span><div>${escapeHtml(msg)}</div></div>`;
+}
+/** 批量取关面板内的错误 / 警告 / 提示信息（错误会直接显示在面板里，不再只是 toast 一闪而过） */
+function showBatchMessage(type, msg, sub) {
+  const box = $('#batchbox');
+  if (!box) return;
+  const cls = type === 'error' ? 'is-error' : type === 'warn' ? 'is-warn' : 'is-info';
+  box.innerHTML =
+    `<div class="batch-msg ${cls}"><div>` +
+    `<div class="bm-title">${escapeHtml(msg)}</div>` +
+    (sub ? `<div class="bm-sub">${escapeHtml(sub)}</div>` : '') +
+    `</div></div>`;
+}
+
 function switchBatchMode(mode) {
   BATCH.mode = mode;
   $$('.seg-btn[data-bmode]').forEach((b) => b.classList.toggle('active', b.dataset.bmode === mode));
@@ -839,13 +868,19 @@ async function doBatchSearch() {
   const maxPages = $('#batch-search-pages').checked ? clampInt($('#batch-maxpages').value, 1, 20, 3) : 3;
   const reqId = ++BATCH.reqId;
   BATCH.loading = true; setBatchBusy(true);
+  setBatchLoading('正在搜索「' + kw + '」…（通常需数秒到十余秒，请稍候）');
   setStatus('正在搜索「' + kw + '」…');
   let r;
   try { r = await window.api.unfollowSearch(ST.selected, kw, maxPages); }
   catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
   if (reqId !== BATCH.reqId) return;   // 过期响应（用户已切模式/重新搜索）直接丢弃
   BATCH.loading = false; setBatchBusy(false);
-  if (!r || !r.ok) { setStatus('搜索失败：' + ((r && r.error) || '未知')); return toast('搜索失败：' + ((r && r.error) || '未知')); }
+  if (!r || !r.ok) {
+    const m = (r && r.error) || '未知错误';
+    setStatus('搜索失败：' + m);
+    showBatchMessage('error', '搜索失败：' + m, '请检查账号登录态（点「刷新资料」或重新登录）；B 站搜索接口偶发限流，可稍后重试。');
+    return;
+  }
   BATCH.items = (r.list || []).map((it) => {
     const o = Object.assign({}, it, { selected: false, result: '', detail: '' });
     const p = BATCH.profiles[String(it.mid)];
@@ -853,6 +888,15 @@ async function doBatchSearch() {
     return o;
   });
   applyBatchFilters();
+  if (r.warning) {
+    const box = $('#batchbox');
+    if (box) {
+      const w = document.createElement('div');
+      w.className = 'batch-warn';
+      w.textContent = r.warning;
+      box.insertBefore(w, box.firstChild);
+    }
+  }
   setStatus(`搜索「${kw}」返回 ${BATCH.items.length} 人，筛选后展示 ${BATCH.filtered.length} 人`);
   toast(`搜索到 ${BATCH.items.length} 人`);
 }
@@ -861,13 +905,19 @@ async function doBatchLoad() {
   if (!ST.selected) return toast('请先选中一个账号');
   const reqId = ++BATCH.reqId;
   BATCH.loading = true; setBatchBusy(true);
+  setBatchLoading('正在载入「我的关注」…（关注较多时可能需 10~30 秒，请稍候）');
   setStatus('正在载入我的关注列表…');
   let r;
   try { r = await window.api.unfollowLoadFollowings(ST.selected, 20); }
   catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
   if (reqId !== BATCH.reqId) return;
   BATCH.loading = false; setBatchBusy(false);
-  if (!r || !r.ok) { setStatus('载入失败：' + ((r && r.error) || '未知')); return toast('载入失败：' + ((r && r.error) || '未知')); }
+  if (!r || !r.ok) {
+    const m = (r && r.error) || '未知错误';
+    setStatus('载入失败：' + m);
+    showBatchMessage('error', '载入关注失败：' + m, '请检查账号登录态（点「刷新资料」或重新登录）；若提示限流可稍后重试。');
+    return;
+  }
   BATCH.items = (r.list || []).map((it) => {
     const o = Object.assign({}, it, { selected: false, result: '', detail: '' });
     const p = BATCH.profiles[String(it.mid)];
@@ -875,6 +925,15 @@ async function doBatchLoad() {
     return o;
   });
   applyBatchFilters();
+  if (r.warning) {
+    const box = $('#batchbox');
+    if (box) {
+      const w = document.createElement('div');
+      w.className = 'batch-warn';
+      w.textContent = r.warning;
+      box.insertBefore(w, box.firstChild);
+    }
+  }
   setStatus(`已载入关注 ${BATCH.items.length} 人（共 ${r.total} 关注），筛选后展示 ${BATCH.filtered.length} 人`);
   toast(`载入 ${BATCH.items.length} 人`);
 }

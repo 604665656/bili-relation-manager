@@ -86,6 +86,7 @@ html, body {
   display: grid;
   grid-template-columns: var(--left-w, 268px) 8px minmax(0, 1fr) 8px var(--right-w, 380px);
   gap: 6px; padding: 10px; height: calc(100% - 54px - 28px);
+  overflow: hidden;   /* 极端窄窗下不溢出、不出现横向滚动条，配合 JS 视口钳制防中栏塌缩 */
 }
 /* 侧边栏 / 日志面板拖拽分隔条：拖到边缘时高亮，提示可调整宽度 */
 .resizer { position: relative; cursor: col-resize; background: transparent; }
@@ -408,3 +409,24 @@ input[type=text]:focus { border-color: var(--pink); }
 #batch-confirm-list { max-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
 #batch-confirm-list table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 #batch-confirm-list th, #batch-confirm-list td { padding: 5px 8px; border-bottom: 1px solid var(--line); }
+
+/* 批量取关：加载态（转圈）/ 错误 / 警告 / 提示 */
+.batch-msg { display: flex; align-items: center; gap: 12px; padding: 18px 12px; font-size: 13px; color: var(--txt2); }
+.batch-msg.is-error { color: #ff9aa6; }
+.batch-msg.is-warn { color: #ffd479; }
+.batch-msg.is-info { color: var(--txt2); }
+.batch-msg .bm-title { font-weight: 600; }
+.batch-msg .bm-sub { color: var(--muted); font-size: 11.5px; margin-top: 5px; line-height: 1.65; }
+.batch-msg.is-error .bm-sub { color: #c9a0a6; }
+.batch-msg.is-warn .bm-sub { color: #d9b877; }
+.spinner {
+  width: 18px; height: 18px; border-radius: 50%; flex: 0 0 18px;
+  border: 2px solid var(--line); border-top-color: var(--pink);
+  animation: brm-spin 0.8s linear infinite;
+}
+@keyframes brm-spin { to { transform: rotate(360deg); } }
+.batch-warn {
+  padding: 8px 10px; margin-bottom: 8px; border-radius: 8px;
+  background: rgba(251, 191, 36, .12); border: 1px solid rgba(251, 191, 36, .4);
+  color: var(--yellow); font-size: 12px; line-height: 1.5;
+}
