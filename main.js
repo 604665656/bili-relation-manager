@@ -19,7 +19,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-02 批量取关健壮性修复 · 错误可见 · 布局防塌缩 v2.2.1';
+const BUILD_TAG = '2026-11-02 三栏布局防塌缩修复 · 显式网格列锚定 · v2.2.2';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */

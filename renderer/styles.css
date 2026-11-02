@@ -88,6 +88,14 @@ html, body {
   gap: 6px; padding: 10px; height: calc(100% - 54px - 28px);
   overflow: hidden;   /* 极端窄窗下不溢出、不出现横向滚动条，配合 JS 视口钳制防中栏塌缩 */
 }
+/* 显式锚定各面板所在网格列：中间「配置」面板在无账号时被 [hidden]（display:none）移出网格，
+   若依赖自动排布，其余面板会整体左移、右侧「运行结果」被挤进 8px 分隔条那一列 → 整栏塌缩成竖排字。
+   显式指定列号后，隐藏中间面板不会撼动左/右栏位置。 */
+.accounts { grid-column: 1; grid-row: 1; }
+#resize-left { grid-column: 2; grid-row: 1; }
+#cfg-panel { grid-column: 3; grid-row: 1; }
+#resize-right { grid-column: 4; grid-row: 1; }
+.logs { grid-column: 5; grid-row: 1; }
 /* 侧边栏 / 日志面板拖拽分隔条：拖到边缘时高亮，提示可调整宽度 */
 .resizer { position: relative; cursor: col-resize; background: transparent; }
 .resizer::before {
