@@ -19,7 +19,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-02 三栏布局防塌缩修复 · 显式网格列锚定 · v2.2.2';
+const BUILD_TAG = '2026-11-02 三搜索路径可用化 · 公开搜索免登录 · 核对关注状态 v2.2.3';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -529,8 +529,17 @@ function registerIPC() {
     if (!keyword) return { ok: false, error: '关键词为空' };
     const client = new BiliClient(acc.cookie);
     if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
-    const nav = await client.nav();
-    if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
+    // 搜索是公开接口，nav 仅用于辅助判断登录态；nav 失败（如 -101 过期）不再阻断搜索——
+    // 搜索结果仍可正常返回，仅「取关」需有效登录，通过 authNote 提示用户重新登录。
+    let authNote = '';
+    try {
+      const nav = await client.nav();
+      if (!nav || nav.code !== 0) {
+        authNote = '登录态已失效（nav=' + (nav ? nav.code : 'null') + '），搜索结果可正常查看，但「取关」需要有效登录（请点账号的「刷新资料 / 扫码登录」后重试）';
+      }
+    } catch (e) {
+      authNote = '无法校验登录态（' + ((e && e.message) || e) + '），搜索仍可尝试；取关需有效登录';
+    }
     const maxPages = clampNum((p && p.maxPages) || 3, 1, 20);
     const list = [];
     let lastErr = null;
@@ -538,10 +547,10 @@ function registerIPC() {
       const j = await searchWithRetryMain(client, keyword, pn, id);
       if (!j || j.code !== 0) {
         lastErr = (j && j.message) || '搜索失败';
-        // 首屏就失败：直接返回错误，不再静默返回空列表让界面误判为「无结果」
-        if (pn === 1) return { ok: false, error: lastErr, list: [] };
+        // 首屏就失败：直接返回错误（含登录提示），不再静默返回空列表让界面误判为「无结果」
+        if (pn === 1) return { ok: false, error: (lastErr + (authNote ? '；' + authNote : '')), list: [] };
         // 中途某页失败：保留已采集部分并提示，避免丢失前几页数据
-        return { ok: true, list, total: list.length, warning: `第 ${pn} 页起请求失败（${lastErr}），已展示前 ${list.length} 条` };
+        return { ok: true, list, total: list.length, warning: `第 ${pn} 页起请求失败（${lastErr}），已展示前 ${list.length} 条`, authNote: authNote || undefined };
       }
       for (const it of (j.list || [])) {
         list.push({
@@ -553,7 +562,7 @@ function registerIPC() {
       if (!((j.list || []).length)) break;
       if (pn < maxPages) await sleep(store.get().global.pageGap || 1200);
     }
-    return { ok: true, list, total: list.length };
+    return { ok: true, list, total: list.length, authNote: authNote || undefined };
   }));
 
   /** 载入「我的关注列表」：用于无关键字排查「我关注但 TA 未回关」的人 */
@@ -564,7 +573,10 @@ function registerIPC() {
     const client = new BiliClient(acc.cookie);
     if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
     const nav = await client.nav();
-    if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
+    if (nav.code !== 0) {
+      const hint = nav.code === -101 ? '请重新登录（点账号的「刷新资料 / 扫码登录」）' : (nav.message || '');
+      return { ok: false, error: '登录态失效（nav=' + nav.code + '）：' + hint };
+    }
     // 关注列表接口无 1000 硬上限，但为防一次载入过多、且粉丝数区间筛选在关注模式不可用，
     // 这里最多读 20 页（1000 条），与「取关名单」监控口径一致，覆盖绝大多数账号
     const maxPages = clampNum((p && p.maxPages) || 20, 1, 20);
@@ -597,6 +609,38 @@ function registerIPC() {
   }));
 
   /**
+   * 核对关注状态：网页式搜索得到的用户，搜索接口本身不返回 attribute（关注关系位），
+   * 需逐个查 /x/relation 才能知道「我到底关没关注 TA」。本接口批量填充后返回 mid→attribute 映射，
+   * 供界面标出「已关注 / 未关注」，从而只取关真正关注的账号。需有效登录。
+   */
+  ipcMain.handle('unfollow:resolveRelations', safe('unfollow:resolveRelations', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const mids = Array.isArray(p && p.mids) ? p.mids.map(String).filter(Boolean) : [];
+    if (!mids.length) return { ok: false, error: '名单为空' };
+    const client = new BiliClient(acc.cookie);
+    if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
+    const nav = await client.nav();
+    if (nav.code !== 0) {
+      const hint = nav.code === -101 ? '请重新登录（点账号的「刷新资料 / 扫码登录」）' : (nav.message || '');
+      return { ok: false, error: '登录态失效（nav=' + nav.code + '）：' + hint };
+    }
+    const map = {};
+    let lastErr = null, okCount = 0;
+    for (let i = 0; i < mids.length; i++) {
+      const mid = mids[i];
+      try {
+        const attr = await client.relation(mid);
+        map[mid] = (typeof attr === 'number') ? attr : null;
+        if (map[mid] !== null) okCount++;
+      } catch (e) { map[mid] = null; lastErr = (e && e.message) || String(e); }
+      if (i < mids.length - 1) await sleep(store.get().global.pageGap || 1200);
+    }
+    return { ok: true, map, resolved: okCount, total: mids.length, warning: lastErr ? ('部分请求失败：' + lastErr) : undefined };
+  }));
+
+  /**
    * 一键批量取关：在主进程执行真实写操作（act=2），带节流 / 看门狗 / 每日上限 / 安全护栏。
    * 逐条进度通过 bus:unfollowProgress 推给界面；最终返回汇总。
    */
@@ -609,7 +653,10 @@ function registerIPC() {
     const client = new BiliClient(acc.cookie);
     if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
     const nav = await client.nav();
-    if (nav.code !== 0) return { ok: false, error: '登录态失效：' + nav.message };
+    if (nav.code !== 0) {
+      const hint = nav.code === -101 ? '请重新登录（点账号的「刷新资料 / 扫码登录」）' : (nav.message || '');
+      return { ok: false, error: '登录态失效（nav=' + nav.code + '）：' + hint };
+    }
 
     const g = store.get().global;
     const excl = {

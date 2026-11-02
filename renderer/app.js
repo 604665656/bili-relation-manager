@@ -249,6 +249,7 @@ function wireEvents() {
    '#batch-activity', '#batch-lastpost', '#batch-minlevel', '#batch-hassign']
     .forEach((sel) => { const el = $(sel); if (el) el.addEventListener('input', applyBatchFiltersLive); });
   $('#btn-batch-enrich').onclick = doBatchEnrich;
+  $('#btn-batch-checkrel').onclick = doBatchResolveRelations;
   $('#batch-selall').onclick = onBatchSelAll;
   $('#btn-batch-unfollow').onclick = openBatchConfirm;
   $('#btn-batch-confirm-ok').onclick = doBatchUnfollow;
@@ -897,6 +898,15 @@ async function doBatchSearch() {
       box.insertBefore(w, box.firstChild);
     }
   }
+  if (r.authNote) {
+    const box = $('#batchbox');
+    if (box) {
+      const w = document.createElement('div');
+      w.className = 'batch-warn';
+      w.textContent = r.authNote;
+      box.insertBefore(w, box.firstChild);
+    }
+  }
   setStatus(`搜索「${kw}」返回 ${BATCH.items.length} 人，筛选后展示 ${BATCH.filtered.length} 人`);
   toast(`搜索到 ${BATCH.items.length} 人`);
 }
@@ -978,6 +988,46 @@ async function doBatchEnrich() {
   setTimeout(() => hideEl($('#batch-enrich-prog')), 1500);
 }
 
+/** 核对搜索结果的关注状态：搜索接口不返回 attribute，逐个查 /x/relation 填充，
+ *  界面即可标出「已关注 / 未关注」，并让「仅我正关注的人」等筛选真正生效。需有效登录。 */
+async function doBatchResolveRelations() {
+  if (!ST.selected) return toast('请先选中一个账号');
+  if (!BATCH.items.length) return toast('请先搜索 / 载入名单');
+  const mids = BATCH.items.map((it) => String(it.mid));
+  BATCH.loading = true; setBatchBusy(true);
+  const btn = $('#btn-batch-checkrel'); if (btn) btn.disabled = true;
+  setBatchLoading('正在核对关注状态…（逐个查询关系位，请稍候）');
+  let r;
+  try { r = await window.api.unfollowResolveRelations(ST.selected, mids); }
+  catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+  BATCH.loading = false; setBatchBusy(false);
+  if (btn) btn.disabled = false;
+  if (!r || !r.ok) {
+    const m = (r && r.error) || '未知错误';
+    setStatus('核对关注状态失败：' + m);
+    showBatchMessage('error', '核对关注状态失败：' + m, '该功能需要有效登录（点账号「刷新资料 / 扫码登录」）。也可直接用「我的关注列表」模式，那里自带关注关系。');
+    return;
+  }
+  const map = r.map || {};
+  let filled = 0;
+  for (const it of BATCH.items) {
+    const a = map[String(it.mid)];
+    if (typeof a === 'number') { it.attribute = a; filled++; }
+  }
+  applyBatchFilters();
+  if (r.warning) {
+    const box = $('#batchbox');
+    if (box) {
+      const w = document.createElement('div');
+      w.className = 'batch-warn';
+      w.textContent = r.warning;
+      box.insertBefore(w, box.firstChild);
+    }
+  }
+  setStatus(`已核对 ${filled} 人的关注状态（共 ${mids.length} 人）；卡片会显示「已关注 / 未关注」，勾选「仅我正关注的人」即可只取关真正关注的。`);
+  toast(`已核对 ${filled} 人`);
+}
+
 /** 富集进度（只读，不写操作） */
 async function onUnfollowEnrich(ev) {
   if (!ev || !ev.type) return;
@@ -1041,6 +1091,7 @@ function applyBatchFilters() {
 function setBatchBusy(b) {
   $('#btn-batch-search').disabled = b;
   $('#btn-batch-load').disabled = b;
+  $('#btn-batch-checkrel').disabled = b;
 }
 
 function renderBatch() {
@@ -1111,6 +1162,8 @@ function updateBatchCounts() {
   btn.disabled = sel === 0 || BATCH.loading || BATCH.executing;
   const eb = $('#btn-batch-enrich');
   if (eb) eb.disabled = total === 0 || BATCH.loading || BATCH.executing || BATCH.enriching;
+  const crb = $('#btn-batch-checkrel');
+  if (crb) crb.disabled = total === 0 || BATCH.loading || BATCH.executing || BATCH.enriching || BATCH.mode !== 'search';
 }
 
 function onBatchSelAll(e) {

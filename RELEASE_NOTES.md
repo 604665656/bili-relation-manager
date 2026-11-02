@@ -1,3 +1,25 @@
+## v2.2.3 三搜索路径可用化 · 公开搜索免登录 · 核对关注状态
+
+针对你「都试试」的诉求，把批量取关的三种找人方式都做扎实；并先厘清一个关键事实：**本机 5 个账号的 cookie 全部 `nav=-101` 过期**，所以当前「搜索/载入/取关都不行」的根因是会话失效（不是布局 bug，那个 v2.2.2 已修；也不是搜索接口坏了，公开搜索本身是通的）。
+
+### 1. 放开搜索的 nav 卡口（公开搜索不再被过期 cookie 拦死）
+- 搜索走的是 B 站**公开**接口 `/x/web-interface/search/type`，本不需要登录。原 `unfollow:search` 在搜索前先卡 `nav.code!==0 → 报「登录态失效」`，等于用过期 cookie 直接把搜索也堵死。
+- 改为：nav 校验**不再阻断**搜索；nav 失败时仅在结果里带 `authNote`，界面顶部提示「搜索结果可看，取关需重新登录」。这样即使没登录也能先看搜索结果。
+
+### 2. 网页式搜 UP 主 → 取关（新增「核对关注状态」）
+- 搜索接口不返回「我是否关注 TA」的关系位，原结果全是 `attribute=null`，导致「搜出来的人到底关没关注」分不清。
+- 新增 `unfollow:resolveRelations`：对搜索结果逐个查 `/x/relation` 填充关系位；界面加「**核对关注状态**」按钮（搜索模式下可用），点完后每张卡片标出「已关注 / 未关注」，并让「仅我正关注的人」筛选真正生效，只取关真正关注的。
+
+### 3. 列表内本地搜索 + 拉名单→勾选→取关（原样保留并加固）
+- 本地关键字过滤（`filterCandidates` 昵称/UID 子串）、「我的关注列表 → 载入我的关注」模式均保留可用。
+- 三处 `nav=-101` 失败统一给出可操作提示：「登录态已失效（nav=-101），请重新登录（点账号的「刷新资料 / 扫码登录」）」。
+
+### 工程
+- `main.js`：放松 `unfollow:search` 的 nav 卡口（`authNote` 透传）；新增 `unfollow:resolveRelations`；`loadFollowings`/`batch` 的 -101 提示更明确；`BUILD_TAG` 升 v2.2.3。
+- `preload.js`：暴露 `unfollowResolveRelations`。
+- `renderer/`：`index.html` 搜索行加「核对关注状态」按钮；`app.js` 新增 `doBatchResolveRelations` 并在 `updateBatchCounts`/`setBatchBusy` 管理按钮态；`authNote` 在搜索结果面板内提示。
+- 测试 147 项全绿（新增 `test/search-gate.js` 6 项：本地关键字搜索 / attribute=null 不误杀 / 互关保护 / 仅关注筛选）。
+
 ## v2.2.2 修复：三栏布局防塌缩（真正的根因）
 
 v2.2.1 已修复「返回 0 人 / 搜索载入失败无提示」，但发布后重测发现**取关 tab 大面积留白、批量取关 tab 文字逐字竖排**仍未解决。定位到真正的根因并非窗口宽度，而是 **CSS Grid 自动排布陷阱**：

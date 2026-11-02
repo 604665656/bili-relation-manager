@@ -56,6 +56,12 @@ contextBridge.exposeInMainWorld('api', {
   }),
   onUnfollowEnrich: (cb) => subscribe('bus:unfollowEnrich', cb),
 
+  // 核对搜索结果的关注状态（网页式搜索得到的用户需逐个查关系位，才知道我关没关注 TA）
+  unfollowResolveRelations: (id, mids) => invoke('unfollow:resolveRelations', {
+    id: String(id || ''),
+    mids: Array.isArray(mids) ? mids.map(String) : []
+  }),
+
   updaterCheck: () => invoke('updater:check'),
   updaterInfo: () => invoke('updater:info'),
   updaterApply: () => invoke('updater:apply'),
