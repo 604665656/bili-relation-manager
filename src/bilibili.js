@@ -335,20 +335,28 @@ class BiliClient {
   }
 
   /**
-   * 最近投稿情况：取按发布时间倒序的第 1 条，返回总投稿数与最近投稿时间（unix 秒）。
+   * 最近投稿情况：取按发布时间倒序的前 N 条，返回总投稿数与「真实最近投稿时间」。
    * 用于判断「活跃度 / 最近有没有投稿」。失败返回 { count:0, latestPubdate:null }。
+   *
+   * 置顶陷阱修复（F）：B 站空间会把「置顶视频」顶在最前，而置顶可能是一条很旧的视频。
+   * 若只取 list[0] 的 pubdate，会被置顶旧视频误导成「最近才发过」。这里取前 N 条，
+   * 用其中的最大 pubdate 作为「最近投稿时间」，自然规避单条置顶造成的误判。
    */
-  async recentVideo(vmid) {
+  async recentVideo(vmid, probe = 3) {
     await this.ensureBuvid();
     await this.getWbiKeys();
-    const q = await this.signParams({ mid: vmid, order: 'pubdate', pn: 1, ps: 1 });
+    const q = await this.signParams({ mid: vmid, order: 'pubdate', pn: 1, ps: Math.max(1, probe) });
     const j = await this.request('https://api.bilibili.com/x/space/wbi/arc/search?' + q, {
       referer: `https://space.bilibili.com/${vmid}/video`
     });
     if (!j || j.code !== 0 || !j.data) return { count: 0, latestPubdate: null };
     const count = (j.data.page && Number(j.data.page.count)) || 0;
     const list = (j.data.list && j.data.list.vlist) || [];
-    const latest = list.length ? Number(list[0].pubdate) || null : null;
+    let latest = null;
+    for (const v of list) {
+      const t = Number(v.pubdate) || 0;
+      if (t && (latest === null || t > latest)) latest = t;
+    }
     return { count, latestPubdate: latest };
   }
 

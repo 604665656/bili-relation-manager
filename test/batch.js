@@ -3,7 +3,8 @@
 const assert = require('assert');
 const {
   MUTUAL, FOLLOWED, iFollow, followsMe, isMutual,
-  classifyActivity, computeOneWay, filterCandidates, canUnfollow
+  classifyActivity, classifySegment, diffFollowLists, SEG_DORMANT_MAX_DAYS,
+  computeOneWay, filterCandidates, canUnfollow
 } = require('../src/batch-unfollow');
 
 let pass = 0, fail = 0;
@@ -143,6 +144,66 @@ t('默认保护互关：不取关互关的人', () => {
 });
 t('普通单向关注可正常取关', () => {
   assert.deepStrictEqual(canUnfollow(mk(5, 'x', 5, F), {}), { ok: true });
+});
+
+console.log('\n[批量取关：classifySegment 死粉三段细分]');
+// 注意：classifySegment 内部用真实 Date.now() 计算天数（生产环境正确），测试数据需相对真实时间构造
+const RN = Math.floor(Date.now() / 1000);
+t('已注销/不可关注 → deleted（最高优先级）', () => {
+  assert.strictEqual(classifySegment({ flagDeleted: true }, {}).key, 'deleted');
+  // 即便活跃度数据再新，已注销也优先归 deleted
+  assert.strictEqual(classifySegment({ flagDeleted: true, lastPubdate: RN - 10 * D, archiveCount: 100 }, {}).key, 'deleted');
+});
+t('从未投稿（count=0）→ never', () => {
+  assert.strictEqual(classifySegment({ lastPubdate: null, archiveCount: 0 }, {}).key, 'never');
+});
+t('90 天内 → active', () => {
+  assert.strictEqual(classifySegment({ lastPubdate: RN - 10 * D, archiveCount: 5 }, {}).key, 'active');
+});
+t('90~365 天 → occasional', () => {
+  assert.strictEqual(classifySegment({ lastPubdate: RN - 200 * D, archiveCount: 5 }, {}).key, 'occasional');
+});
+t('停更且曾高产（archive≥20）→ decay（内容变质）', () => {
+  const s = classifySegment({ lastPubdate: RN - 400 * D, archiveCount: 50 }, {});
+  assert.strictEqual(s.key, 'decay');
+});
+t('停更且低产、且 ≤ 沉寂临界上界 → dormant（沉寂临界）', () => {
+  const s = classifySegment({ lastPubdate: RN - 400 * D, archiveCount: 5 }, {});
+  assert.strictEqual(s.key, 'dormant');
+  assert.ok(400 <= SEG_DORMANT_MAX_DAYS, '临界上界应 ≥ 400 才能命中');
+});
+t('停更超过沉寂临界上界 → stopped', () => {
+  const s = classifySegment({ lastPubdate: RN - (SEG_DORMANT_MAX_DAYS + 100) * D, archiveCount: 5 }, {});
+  assert.strictEqual(s.key, 'stopped');
+});
+t('decay 优先级高于 dormant/stopped（曾高产不论停更多久都归 decay）', () => {
+  const s = classifySegment({ lastPubdate: RN - 2000 * D, archiveCount: 25 }, {});
+  assert.strictEqual(s.key, 'decay');
+});
+
+console.log('\n[批量取关：diffFollowLists 集合求差（文件级同步语义）]');
+t('current 有、target 没有 → toUnfollow（多余，应取关）', () => {
+  const r = diffFollowLists([{ mid: '1', uname: 'A' }, { mid: '2', uname: 'B' }], [{ mid: '2', uname: 'B' }]);
+  assert.deepStrictEqual(r.toUnfollow.map((x) => x.mid), ['1']);
+  assert.deepStrictEqual(r.toFollow.map((x) => x.mid), []);
+  assert.deepStrictEqual(r.unchanged.map((x) => x.mid), ['2']);
+});
+t('target 有、current 没有 → toFollow（缺失，应补关注）', () => {
+  const r = diffFollowLists([{ mid: '1', uname: 'A' }], [{ mid: '1', uname: 'A' }, { mid: '3', uname: 'C' }]);
+  assert.deepStrictEqual(r.toFollow.map((x) => x.mid), ['3']);
+  assert.deepStrictEqual(r.toUnfollow.map((x) => x.mid), []);
+});
+t('mid 归一为字符串比对（数字与字符串同值视为相同）', () => {
+  const r = diffFollowLists([{ mid: 1, uname: 'A' }], [{ mid: '1', uname: 'A' }]);
+  // 数字 1 与字符串 '1' 视为同一人 → 不应出现重复取关/补关注
+  assert.strictEqual(r.unchanged.length, 1);
+  assert.strictEqual(r.toUnfollow.length, 0);
+  assert.strictEqual(r.toFollow.length, 0);
+});
+t('空 target → 全为 toUnfollow', () => {
+  const r = diffFollowLists([{ mid: '1' }, { mid: '2' }], []);
+  assert.deepStrictEqual(r.toUnfollow.map((x) => x.mid), ['1', '2']);
+  assert.deepStrictEqual(r.toFollow, []);
 });
 
 console.log(`\n[批量取关单测] 通过 ${pass} · 失败 ${fail}`);

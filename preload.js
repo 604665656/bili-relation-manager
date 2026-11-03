@@ -52,7 +52,24 @@ contextBridge.exposeInMainWorld('api', {
     id: String(id || ''),
     items: Array.isArray(items) ? items : [],
     excludeMutual: opts && opts.excludeMutual !== false,
+    excludeSpecial: opts && opts.excludeSpecial,
+    previewOnly: opts && !!opts.previewOnly,
+    sessionCap: opts && opts.sessionCap,
+    skipRecentFollowDays: opts && opts.skipRecentFollowDays,
     delayMin: opts && opts.delayMin, delayMax: opts && opts.delayMax
+  }),
+  // P0-B 显式导出待操作备份
+  unfollowExportBackup: (id, items) => invoke('unfollow:exportBackup', { id: String(id || ''), items: Array.isArray(items) ? items : [] }),
+  // P1-D 文件同步：补关注 + 集合求差计划
+  unfollowFollowBatch: (id, items, opts) => invoke('unfollow:followBatch', {
+    id: String(id || ''),
+    items: Array.isArray(items) ? items : [],
+    delayMin: opts && opts.delayMin, delayMax: opts && opts.delayMax
+  }),
+  unfollowSyncPlan: (id, current, target) => invoke('unfollow:syncPlan', {
+    id: String(id || ''),
+    current: Array.isArray(current) ? current : [],
+    target: Array.isArray(target) ? target : []
   }),
   onUnfollowProgress: (cb) => subscribe('bus:unfollowProgress', cb),
   unfollowEnrich: (id, mids, opts) => invoke('unfollow:enrich', {

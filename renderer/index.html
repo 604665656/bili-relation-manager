@@ -299,6 +299,23 @@
           <label class="cb small">等级 ≥
             <input type="number" id="batch-minlevel" placeholder="0" min="0" style="width:48px"></label>
           <label class="cb small"><input type="checkbox" id="batch-hassign"> 有简介</label>
+          <span class="sep"></span>
+          <label class="lbl">死粉分段</label>
+          <select id="batch-segment">
+            <option value="">全部</option>
+            <option value="deleted">已注销 / 不可关注</option>
+            <option value="decay">内容变质（曾高产 · 停更）</option>
+            <option value="stopped">停更（低产沉寂）</option>
+            <option value="dormant">沉寂临界</option>
+            <option value="occasional">偶尔</option>
+            <option value="active">活跃</option>
+            <option value="never">从未投稿</option>
+          </select>
+          <span class="sep"></span>
+          <label class="cb small" title="单次批量取关会话上限：0 = 不限，超过部分留待下一轮再处理（防止一次点错取太多）">本次上限
+            <input type="number" id="batch-session-cap" min="0" style="width:64px"> 人</label>
+          <label class="cb small" title="最近关注 ≤ N 天的人自动豁免取关（保护刚关注还没发内容的 UP）">最近关注 ≤
+            <input type="number" id="batch-skip-days" min="0" style="width:48px"> 天保护</label>
           <button class="btn accent small" id="btn-batch-enrich" disabled>分析画像 / 活跃度</button>
         </div>
 
@@ -307,6 +324,8 @@
           <label class="cb small"><input type="checkbox" id="batch-selall"> 全选</label>
           <span class="muted" id="batch-count">共 0 人，已选 0 人</span>
           <span class="grow"></span>
+          <label class="cb small"><input type="checkbox" id="batch-demo" title="只预览将取关的名单，不发送真实取关请求"> 演示模式</label>
+          <button class="btn ghost small" id="btn-batch-backup" disabled title="把当前已选名单导出为本地 CSV 备份">导出待操作备份</button>
           <button class="btn danger small" id="btn-batch-unfollow" disabled>一键取关（0）</button>
         </div>
 
@@ -318,6 +337,24 @@
           <div class="batch-bar"><i style="width:0%"></i></div>
           <span class="muted" id="batch-prog-txt"></span>
         </div>
+
+        <!-- 文件级同步（集合求差）：把当前关注与导入的目标集比较，多余的取关、缺失的补关注 -->
+        <details class="batch-sync" id="batch-sync">
+          <summary>文件级同步（换号迁移 / 备份还原）</summary>
+          <p class="muted">把「当前关注列表」与「目标关注集」做集合求差：当前有但目标没有 → 取关；目标有但当前没有 → 补关注。每行格式：<code>MID,昵称</code>（昵称可空）。</p>
+          <div class="sync-row">
+            <textarea id="sync-target" rows="6" placeholder="例如：&#10;123456,示例UP主A&#10;789012,&#10;345678,示例UP主C"></textarea>
+          </div>
+          <div class="sync-row">
+            <button class="btn accent small" id="btn-sync-plan">计算同步计划</button>
+            <span class="muted" id="sync-plan-tip">先用上方「我的关注列表」载入当前关注，再粘贴目标集</span>
+          </div>
+          <div class="recbox" id="sync-plan-box" hidden></div>
+          <div class="sync-row" id="sync-exec-row" hidden>
+            <button class="btn danger small" id="btn-sync-run">执行同步（先补关注，再取关多余）</button>
+            <label class="cb small"><input type="checkbox" id="sync-demo" checked> 仅预览</label>
+          </div>
+        </details>
         <div id="batchbox" class="batchbox">
           <p class="muted" style="padding:10px">选择上方模式并加载名单后，这里会列出可批量取关的对象。取关前会二次确认并预览名单。</p>
         </div>

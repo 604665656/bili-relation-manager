@@ -46,6 +46,13 @@ const DEFAULT_ACCOUNT_CFG = {
   loopIntervalMin: 30,   // 每轮间隔（分钟）
   dailyCap: 0,           // 每日操作总量上限，0 = 不限
 
+  // ── 风控参数面板化（借鉴 wuko233 默认哲学：保守、可配、危险默认关闭）──
+  sessionCap: 0,              // 单次批量取关会话上限（0 = 不限；与 maxOps「单轮」区分，UI 手动批量时再设一道闸）
+  skipRecentFollowDays: 0,    // 最近关注 N 天内的账号豁免取关（保护刚关注还没发内容的 UP；0 = 不豁免）
+  autoWhitelistMutual: true,  // 互关自动进白名单（不取关互粉）
+  autoWhitelistSpecial: true, // 特别关注自动进白名单
+  backupBeforeUnfollow: true, // 执行真实取关前，强制先导出待操作名单 CSV 备份（四段式闸门，防误删）
+
   // ── 异常自动重启 ──
   errRetryMin: 0,        // 任务异常后，等待 N 分钟再自动重启（0 = 不重启，异常即停止）
 
@@ -197,7 +204,9 @@ class Store {
       followerSnapshot: Array.isArray(a.followerSnapshot) ? a.followerSnapshot.slice(-2000) : [],
       lastFollowerSnapDate: typeof a.lastFollowerSnapDate === 'string' ? a.lastFollowerSnapDate : '',
       // 取关我的名单：{ date, mid, uname, handled: null|'auto'|'blocked'|'ignored' }
-      unfollowers: Array.isArray(a.unfollowers) ? a.unfollowers : []
+      unfollowers: Array.isArray(a.unfollowers) ? a.unfollowers : [],
+      // P2-H：关系图谱数据模型（双向关系 + 互动频率 + 内容相关性），为超越「待删列表」的画像视图奠基
+      relationGraph: (a.relationGraph && typeof a.relationGraph === 'object') ? a.relationGraph : null
     };
   }
 

@@ -1,3 +1,41 @@
+## v2.4.0 竞品借鉴升级 · 死粉三段细分 · 文件级同步 · 风控面板化 · 四段式护栏
+
+承接你「同类/同风格竞品穷尽对比、借鉴升级」的诉求，对市面同类产品（BilibiliFollowManage、bilibili-following-manager、kkmx/bili-follow-manager、wuko233/bili-follow-cleaner、CKylinMC FoMan，及 X 生态 XUnfollow / Superpowers for X / FRAOTIAC 等）做了系统拆解，把最值得借鉴的能力落到 brm：
+
+### 1. 死粉三段细分（P0-A，借鉴 bilibili-following-manager 思路）
+- 画像/活跃度分析后，在「活跃 / 偶尔」之上，把「值得清的沉默号」再拆成有决策意义的桶：**已注销/不可关注 · 内容变质(曾高产停更) · 停更(低产沉寂) · 沉寂临界 · 偶尔 · 活跃 · 从未投稿**。
+- 顶部新增「死粉分段」筛选下拉，配合「分析画像/活跃度」即可按段秒筛（如只取关「停更」与「内容变质」）。
+- 修复 `classifySegment` 原 `dormant(沉寂临界)` 阈值不可达的缺陷：改用 `SEG_DORMANT_MAX_DAYS=540` 天作为「临界/停更」分界，三段均可命中。
+- 纯逻辑 `classifySegment` / `attachSegments` 已单测覆盖全部分段。
+
+### 2. 四段式护栏 + 具名确认 + 强制 CSV 备份闸门（P0-B）
+- 复用 kkmx「先出报告再执行」与 X 系「执行前强制备份」哲学：取关前先自动把「待操作名单」导出本地 CSV 备份（BOM 便于 Excel），再执行真实取关；备份路径回传界面提示。
+- 确认弹窗升级为**具名表格**（昵称/UID/关系/活跃度/死粉分段），并明确提示「演示模式」「执行前备份」两种状态，让用户做的是决策而非盲点。
+
+### 3. 风控参数面板化（P0-C，借鉴 wuko233 默认保守哲学）
+- 账号配置新增 5 项默认保守、危险默认关闭的护栏：`sessionCap`(单次批量上限)、`skipRecentFollowDays`(最近关注豁免)、`autoWhitelistMutual`、`autoWhitelistSpecial`、`backupBeforeUnfollow`。
+- 批量取关面板新增「本次上限 N 人」「最近关注 ≤ N 天保护」两个输入；`loadFollowings` 现从接口 `mtime` 计算 `followDays`，使「最近关注豁免」真正生效。
+
+### 4. 文件级同步语义 · 集合求差（P1-D，借鉴 BilibiliFollowManage「从文件同步」）
+- 新增「文件级同步」面板：把「当前关注」与「目标关注集(MID,昵称)」做集合求差 → 多余的取关、缺失的补关注。
+- 新增 IPC `unfollow:syncPlan`（求差）/`unfollow:followBatch`（补关注，与取关对称）/`unfollow:exportBackup`（显式备份）；纯函数 `diffFollowLists` 已单测覆盖。
+
+### 5. 演示/预览模式增强（P1-E）
+- 批量取关的「演示模式」现在走真实预览：主进程逐条计算「将取关/跳过」并生成具名计划、导出预览备份，但**不发送任何真实请求**；界面与进度回调均标注「预览」。
+
+### 6. 活跃度置顶陷阱修复（P1-F）
+- `recentVideo` 现取「前 N 条投稿的最大 pubdate」而非 `list[0]`，规避 B 站把很旧的**置顶视频**顶在最前导致的「误判为近期活跃」。新增 `test/bilibili-archive.js` 用 mock 验证。
+
+### 7. 平台适配器抽象（P2-G）与关系图谱数据模型（P2-H）
+- 新增 `src/platforms/`：统一 `RelationAdapter` 接口（nav/followings/followers/modify/profile/recentPosts）+ 注册表，B 站已实现适配器包装既有 `BiliClient`；微博/抖音/小红书仅留**合规预留挂载点，不接入真实第三方**（不碰云端代登录/凭据托管）。
+- `store.js` 新增 `relationGraph` 字段，为「超越待删列表的关系画像视图」奠基。
+
+### 工程
+- `main.js`：`unfollow:batch` 增强（previewOnly/sessionCap/skipRecentFollowDays/autoSpecial + `_batchSkipReason` + `writeUnfollowBackup`）；`unfollow:enrich` 算 segment；新增 `unfollow:exportBackup`/`unfollow:followBatch`/`unfollow:syncPlan`；注册平台适配器。
+- `preload.js`：透传新参数 + 暴露 3 个新 API。
+- `renderer/`：`index.html` 加死粉分段下拉、演示模式、导出备份、文件同步面板、本次上限/最近关注保护；`app.js` 接线全部新交互与预览回执；`styles.css` 加分段配色/同步面板/消息条样式。
+- 测试 **173 项全绿**（新增 `test/bilibili-archive.js` 3 项；`test/batch.js` 扩充 12 项 classifySegment / diffFollowLists）。
+
 ## v2.3.0 多方式登录 · 官方API二维码扫码 · refresh_token自动续期
 
 针对你「穷尽所有方式、也查一下开源有没有更合适的方案」的诉求，把登录/会话恢复做到极致，并对照 bilibili-API-collect、BiliTools、@renmu/bili-api 等开源方案取证取舍。

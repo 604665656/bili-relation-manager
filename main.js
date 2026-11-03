@@ -9,7 +9,11 @@ const { BiliClient, sleep } = require('./src/bilibili');
 const auth = require('./src/auth');
 const { Engine, sourceLabel, accountsToAutoStart } = require('./src/task');
 const { Updater } = require('./src/updater');
-const { canUnfollow, classifyActivity } = require('./src/batch-unfollow');
+const { canUnfollow, classifyActivity, classifySegment, diffFollowLists } = require('./src/batch-unfollow');
+const platforms = require('./src/platforms');
+const { BilibiliAdapter } = require('./src/platforms/bilibili-adapter');
+// P2-G：注册平台适配器（当前仅 B 站；微博/抖音/小红书为合规敏感预留挂载点，不在此接入）
+platforms.registerAdapter('bilibili', (cookie) => new BilibiliAdapter(cookie));
 
 /** 数值范围钳制（main 内多处复用，统一放这里） */
 function clampNum(v, lo, hi, dft) {
@@ -20,7 +24,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-03 多方式登录 · 官方API扫码登录 · refresh_token自动续期 v2.3.0';
+const BUILD_TAG = '2026-11-03 竞品借鉴升级 · 死粉三段细分 · 文件级同步 · 风控面板化 · 四段式护栏 v2.4.0';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -665,12 +669,15 @@ function registerIPC() {
       }
       if (typeof j.data.total === 'number') total = j.data.total;
       for (const it of (j.data.list || [])) {
+        const mtime = (typeof it.mtime === 'number') ? it.mtime : null;
         list.push({
           mid: String(it.mid), uname: it.uname || '',
           face: (it.face) ? String(it.face) : null,
           sign: (it.sign) ? String(it.sign) : null,
           fans: (typeof it.fans === 'number') ? it.fans : null,
-          attribute: (typeof it.attribute === 'number') ? it.attribute : null
+          attribute: (typeof it.attribute === 'number') ? it.attribute : null,
+          // P0-C：关注天数（来自接口 mtime），用于「最近关注 N 天豁免取关」；null=未知
+          followDays: mtime ? Math.max(0, Math.floor((Date.now() / 1000 - mtime) / 86400)) : null
         });
       }
       if (!((j.data.list || []).length)) break;
@@ -731,23 +738,59 @@ function registerIPC() {
     }
 
     const g = store.get().global;
+    const o = p || {};
+    const previewOnly = !!o.previewOnly;                       // P1-E Demo/预览：只算计划不落地
+    const sessionCap = clampNum(o.sessionCap || acc.cfg.sessionCap || 0, 0, 100000);
+    const skipRecentDays = clampNum(o.skipRecentFollowDays || acc.cfg.skipRecentFollowDays || 0, 0, 100000);
+    const autoMutual = o.excludeMutual !== false;              // 默认保护互关
+    const autoSpecial = (o.excludeSpecial !== false) && (acc.cfg.autoWhitelistSpecial !== false);
+    const needBackup = (acc.cfg.backupBeforeUnfollow !== false) && !previewOnly; // P0-B 强制备份闸门
+
+    let working = items;
+    if (sessionCap > 0 && working.length > sessionCap) {
+      working = working.slice(0, sessionCap);
+      sendLog('warn', `单次批量取关会话上限 ${sessionCap}，超出部分（${items.length - sessionCap}）留待下一轮`);
+    }
+
     const excl = {
       white: new Set((g.whiteList || []).map(String)),
       neverFollow: new Set((g.neverFollow || []).map(String)),
       dead: (store._deadSet) || new Set((g.deadUsers || []).map(String)),
-      mutual: (p && p.excludeMutual) !== false   // 默认保护互关：不取关互关的人
+      mutual: autoMutual
     };
-    const delayMin = clampNum((p && p.delayMin) || acc.cfg.delayMin || 3000, 1000, 600000);
-    const delayMax = Math.max(delayMin, clampNum((p && p.delayMax) || acc.cfg.delayMax || 6000, 1000, 600000));
+    const delayMin = clampNum(o.delayMin || acc.cfg.delayMin || 3000, 1000, 600000);
+    const delayMax = Math.max(delayMin, clampNum(o.delayMax || acc.cfg.delayMax || 6000, 1000, 600000));
     const dailyCap = Number(acc.cfg.dailyCap) || 0;
 
     let done = 0, ok = 0, fail = 0, skip = 0;
-    const total = items.length;
+    const total = working.length;
     const startAt = Date.now();
     const WATCHDOG_MS = 20 * 60000;   // 单批总耗时保险：超过 20 分钟视为异常，停止以免卡死
+    const plan = [];                  // P0-B 具名确认：记录每个将操作账号与命中原因
+
+    // P0-B 四段式闸门：执行真实取关前，先强制把待操作名单导出为本地 CSV 备份
+    let backupPath = null;
+    if (needBackup) {
+      try { backupPath = writeUnfollowBackup(acc, working); }
+      catch (e) { sendLog('error', '待操作名单备份失败：' + ((e && e.message) || e)); }
+    }
+
+    if (previewOnly) {
+      // P1-E：预览模式——逐条计算「会怎么处理」但不发任何写请求
+      for (const it of working) {
+        const reason = _batchSkipReason(it, excl, { skipRecentDays, autoSpecial });
+        if (reason) { skip++; plan.push({ mid: String(it.mid), uname: it.uname || '', result: '跳过', reason }); }
+        else {
+          ok++; // 预览里「将取关」计为将操作数
+          plan.push({ mid: String(it.mid), uname: it.uname || '', result: '将取关', reason: it.segmentLabel || (it.segment ? ('分段:' + it.segment) : '符合筛选') });
+        }
+      }
+      sendUnfollowProgress({ type: 'done', total, done: total, ok: plan.filter((x) => x.result === '将取关').length, fail: 0, skip: plan.filter((x) => x.result === '跳过').length, preview: true, backupPath });
+      return { ok: true, preview: true, total, plan, backupPath, willUnfollow: plan.filter((x) => x.result === '将取关').length };
+    }
 
     sendUnfollowProgress({ type: 'start', total });
-    for (const it of items) {
+    for (const it of working) {
       if (Date.now() - startAt > WATCHDOG_MS) {
         sendLog('error', `批量取关单批耗时超过 ${WATCHDOG_MS / 60000} 分钟，已停止以防卡死`);
         break;
@@ -756,12 +799,22 @@ function registerIPC() {
         sendLog('warn', '批量取关：已达每日操作上限，停止');
         break;
       }
+      // P0-C：最近关注 N 天豁免；P0-C：特别关注自动白名单
+      const sReason = _batchSkipReason(it, excl, { skipRecentDays, autoSpecial });
+      if (sReason) {
+        skip++; done++;
+        plan.push({ mid: String(it.mid), uname: it.uname || '', result: '跳过', reason: sReason });
+        sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '跳过', detail: sReason, done, total, ok, fail, skip });
+        continue;
+      }
       const chk = canUnfollow(it, excl);
       if (!chk.ok) {
         skip++; done++;
+        plan.push({ mid: String(it.mid), uname: it.uname || '', result: '跳过', reason: chk.reason });
         sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '跳过', detail: chk.reason, done, total, ok, fail, skip });
         continue;
       }
+      plan.push({ mid: String(it.mid), uname: it.uname || '', result: '将取关', reason: it.segmentLabel || '符合筛选' });
       let r;
       try { r = await client.modify(Number(it.mid), 2); }
       catch (e) { r = { ok: false, code: -9999, message: (e && e.message) || String(e), kind: 'fatal' }; }
@@ -782,8 +835,121 @@ function registerIPC() {
       await sleep(wait);
     }
     try { store.flush(); } catch (e) { /* ignore */ }
-    sendUnfollowProgress({ type: 'done', total, done, ok, fail, skip });
+    sendUnfollowProgress({ type: 'done', total, done, ok, fail, skip, backupPath });
+    return { ok: true, total, done, okCount: ok, fail, skip, backupPath };
+  }));
+
+  /**
+   * 批量取关的「跳过原因」统一判定（P0-C）：
+   *   1) 特别关注自动白名单（attribute 第 1 位 = 特别关注）
+   *   2) 最近关注 N 天豁免（it.followDays 来自关注列表 mtime，null=未知则不放行）
+   * @returns {string|null} 返回原因字符串表示跳过；null 表示可继续
+   */
+  function _batchSkipReason(it, excl, opts) {
+    const attr = (typeof it.attribute === 'number') ? it.attribute : null;
+    if (opts.autoSpecial && attr !== null && (attr & 1)) return '特别关注（已保护）';
+    if (opts.skipRecentDays > 0 && it.followDays != null) {
+      if (Number(it.followDays) <= opts.skipRecentDays) return `最近关注 ${it.followDays} 天（≤${opts.skipRecentDays}天豁免）`;
+    }
+    return null;
+  }
+
+  /** P0-B 四段式闸门：把待操作名单导出为本地 CSV 备份（防误删，可回溯） */
+  function writeUnfollowBackup(acc, items) {
+    const dir = path.join(store.dir, 'backups');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(dir, `unfollow_backup_${acc.uname || acc.uid}_${stamp}.csv`);
+    const rows = [['mid', 'uname', 'segment']];
+    for (const it of (items || [])) rows.push([String(it.mid), (it.uname || '').replace(/"/g, '""'), it.segment || '']);
+    const csv = rows.map((r) => r.map((c) => /[",\n]/.test(c) ? '"' + c + '"' : c).join(',')).join('\n');
+    fs.writeFileSync(file, '﻿' + csv, 'utf8');   // BOM 便于 Excel 正确识别 UTF-8
+    return file;
+  }
+
+  /** 显式导出待操作备份（UI 按钮调用，复用四段式备份逻辑） */
+  ipcMain.handle('unfollow:exportBackup', safe('unfollow:exportBackup', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const items = Array.isArray(p && p.items) ? p.items : [];
+    if (!items.length) return { ok: false, error: '名单为空' };
+    try { return { ok: true, path: writeUnfollowBackup(acc, items) }; }
+    catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+  }));
+
+  /**
+   * 手动批量关注（P1-D 文件同步「补关注」所需）：在主进程执行真实写操作（act=1）。
+   * 与 unfollow:batch 对称，带节流 / 每日上限 / 安全护栏。
+   */
+  ipcMain.handle('unfollow:followBatch', safe('unfollow:followBatch', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const items = Array.isArray(p && p.items) ? p.items : [];
+    if (!items.length) return { ok: false, error: '关注名单为空' };
+    const client = new BiliClient(acc.cookie);
+    if (!client.isLoggedCookie) return { ok: false, error: 'Cookie 不完整，请重新登录' };
+    const nav = await client.nav();
+    if (nav.code !== 0) return { ok: false, error: '登录态失效（nav=' + nav.code + '）' };
+    const g = store.get().global;
+    const excl = {
+      white: new Set((g.whiteList || []).map(String)),
+      neverFollow: new Set((g.neverFollow || []).map(String)),
+      dead: (store._deadSet) || new Set((g.deadUsers || []).map(String))
+    };
+    const delayMin = clampNum((p && p.delayMin) || acc.cfg.delayMin || 3000, 1000, 600000);
+    const delayMax = Math.max(delayMin, clampNum((p && p.delayMax) || acc.cfg.delayMax || 6000, 1000, 600000));
+    const dailyCap = Number(acc.cfg.dailyCap) || 0;
+    let done = 0, ok = 0, fail = 0, skip = 0;
+    const total = items.length;
+    const startAt = Date.now();
+    const WATCHDOG_MS = 20 * 60000;
+    sendUnfollowProgress({ type: 'start', total, mode: 'follow' });
+    for (const it of items) {
+      if (Date.now() - startAt > WATCHDOG_MS) { sendLog('error', '批量关注单批超时，已停止'); break; }
+      if (dailyCap > 0 && store.getAccount(id).daily.ops >= dailyCap) { sendLog('warn', '批量关注：已达每日上限'); break; }
+      const chk = canUnfollow({ mid: it.mid, attribute: 0 }, excl); // attribute=0 表示「尚未关注」，canUnfollow 对「未关注」放行
+      if (!chk.ok) { skip++; done++; sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '跳过', detail: chk.reason, done, total, ok, fail, skip, mode: 'follow' }); continue; }
+      let r;
+      try { r = await client.modify(Number(it.mid), 1); }
+      catch (e) { r = { ok: false, code: -9999, message: (e && e.message) || String(e), kind: 'fatal' }; }
+      if (r.ok) { ok++; done++; sendLog('ok', `已关注 ${it.uname || it.mid}`); sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '已关注', done, total, ok, fail, skip, mode: 'follow' }); }
+      else {
+        fail++; done++;
+        sendLog('error', `批量关注失败 ${it.uname || it.mid}：${r.message || ('code=' + r.code)}`);
+        sendUnfollowProgress({ type: 'item', mid: String(it.mid), uname: it.uname || '', result: '失败', detail: r.message || ('code=' + r.code), done, total, ok, fail, skip, mode: 'follow' });
+        if (r.kind === 'fatal') { sendLog('error', '批量关注遇到致命错误码，已停止'); break; }
+        if (r.kind === 'ratelimit') { sendLog('warn', '触发限流，暂停 60s'); await sleep(60000); }
+      }
+      const wait = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+      await sleep(wait);
+    }
+    try { store.flush(); } catch (e) { /* ignore */ }
+    sendUnfollowProgress({ type: 'done', total, done, ok, fail, skip, mode: 'follow' });
     return { ok: true, total, done, okCount: ok, fail, skip };
+  }));
+
+  /**
+   * 文件级同步语义（P1-D，借鉴 BilibiliFollowManage「从文件同步」）：
+   * 把「当前关注列表」与「目标关注集（导入的 TXT/CSV，MID,昵称）」做集合求差，
+   * 返回 { toFollow, toUnfollow, unchanged } 供 UI 预览；执行时分别走 followBatch / batch。
+   * 这是换号迁移、备份还原最自然的抽象。
+   */
+  ipcMain.handle('unfollow:syncPlan', safe('unfollow:syncPlan', async (p) => {
+    const id = String((p && p.id) || '');
+    const acc = store.getAccount(id);
+    if (!acc) return { ok: false, error: '账号不存在' };
+    const current = Array.isArray(p && p.current) ? p.current : [];
+    const target = Array.isArray(p && p.target) ? p.target : [];
+    if (!target.length) return { ok: false, error: '目标关注集为空' };
+    const diff = diffFollowLists(current, target);
+    return {
+      ok: true,
+      toFollow: diff.toFollow.map((x) => ({ mid: String(x.mid), uname: x.uname || '' })),
+      toUnfollow: diff.toUnfollow.map((x) => ({ mid: String(x.mid), uname: x.uname || '' })),
+      unchangedCount: diff.unchanged.length
+    };
   }));
 
   /**
@@ -809,18 +975,22 @@ function registerIPC() {
       try {
         const rv = await client.recentVideo(mid);
         const act = classifyActivity(rv.latestPubdate, rv.count);
+        // P0-A：死粉三段细分（已注销/内容变质/停更/沉寂），复用本地 deadUsers 判定「已注销」
+        const seg = classifySegment({ flagDeleted: store.isDeadUser(mid), lastPubdate: rv.latestPubdate, archiveCount: rv.count });
         out[mid] = {
           mid,
           lastPubdate: rv.latestPubdate,
           archiveCount: rv.count,
           activity: act.key,
           activityLabel: act.label,
-          activityDays: act.days
+          activityDays: act.days,
+          segment: seg.key,
+          segmentLabel: seg.label
         };
         okCount++;
       } catch (e) {
         fail++;
-        out[mid] = { mid, lastPubdate: null, archiveCount: 0, activity: 'unknown', activityLabel: '活跃度未知', activityDays: null };
+        out[mid] = { mid, lastPubdate: null, archiveCount: 0, activity: 'unknown', activityLabel: '活跃度未知', activityDays: null, segment: 'unknown', segmentLabel: '未知' };
       }
       done++;
       sendUnfollowEnrich({ type: 'item', mid, done, total, ok: okCount, fail });

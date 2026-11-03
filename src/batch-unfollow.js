@@ -51,6 +51,83 @@ function classifyActivity(lastPubdate, count, nowSec) {
 }
 
 /**
+ * 死粉三段细分（借鉴 bilibili-following-manager 的 已注销/停更/内容变质 思路，本地数据可判定版）。
+ * 在「活跃度分级」之上，把「值得取关的沉默号」再拆成有决策意义的桶，让用户做的是决策而非翻名单。
+ *
+ * 字段约定（enrich 后写入候选）：
+ *   - flagDeleted:  boolean  已注销 / 不可关注（spaceProfile 返回 null 或昵称含「账号已注销」）
+ *   - lastPubdate / archiveCount：来自 recentVideo / spaceProfile（classifyActivity 同源）
+ *   - followDays:  number|null  已关注天数（来自关注列表 mtime；null=未知）
+ *
+ * 分段（优先级从高到低）：
+ *   deleted  已注销/不可关注       → flagDeleted
+ *   decay    内容变质(高产停更)     → 历史投稿较多(>=DECAY_MIN_ARCHIVE) 且 停更超过阈值(>OCCASIONAL_DAYS)
+ *   stopped  停更(低产沉寂)        → 停更超过阈值 且 不属于上面(decay)
+ *   dormant  沉寂(临界)            → OCCASIONAL_DAYS < 天数 <= ACTIVE_DAYS*2（介于偶尔与停更之间，临界限）
+ *   occasional 偶尔                → classifyActivity 的 occasional
+ *   active   活跃                 → classifyActivity 的 active
+ *   never    从未投稿             → archiveCount 为 0/空
+ *   unknown  未知（无数据）        → 缺 lastPubdate 且未标记 deleted
+ *
+ * @param {{flagDeleted?:boolean, lastPubdate?:number|null, archiveCount?:number|null, followDays?:number|null}} c
+ * @param {{stoppedDays?:number, decayMinArchive?:number}} [opts] 阈值覆盖
+ * @returns {{key:'deleted'|'decay'|'stopped'|'dormant'|'occasional'|'active'|'never'|'unknown', label:string, days:number|null}}
+ */
+const DECAY_MIN_ARCHIVE = 20;     // 历史投稿达到此数视为「曾高产」，停更后归为「内容变质」而非普通低产
+// 「沉寂临界」band 上界：停更超过 OCCASIONAL_DAYS(365) 但不超过此值（≈1.5 年）视为「还能再观望」的临界区，
+// 超过则归为「停更」。注意：ACTIVE_DAYS*2(180) 恒小于 365，不能用作该 band 上界（否则 dormant 永远不可达）。
+const SEG_DORMANT_MAX_DAYS = 540;
+function classifySegment(c, opts) {
+  const o = opts || {};
+  const stoppedDays = (o.stoppedDays != null) ? Number(o.stoppedDays) : OCCASIONAL_DAYS; // 默认 365 天
+  const decayMin = (o.decayMinArchive != null) ? Number(o.decayMinArchive) : DECAY_MIN_ARCHIVE;
+  if (c && c.flagDeleted) return { key: 'deleted', label: '已注销/不可关注', days: null };
+  const act = classifyActivity(c && c.lastPubdate, c && c.archiveCount);
+  if (act.key === 'never') return { key: 'never', label: '从未投稿', days: null };
+  if (act.key === 'active') return { key: 'active', label: act.label, days: act.days };
+  if (act.key === 'occasional') return { key: 'occasional', label: act.label, days: act.days };
+  // 到这里是 days > OCCASIONAL_DAYS（沉寂/停更区间）
+  const days = act.days;
+  const archive = Number((c && c.archiveCount) || 0);
+  if (archive >= decayMin) return { key: 'decay', label: `内容变质（曾高产 ${archive} 投稿，停更 ${days}天）`, days };
+  // 介于 occasional 与 stopped 之间的「临界沉寂」单独标出，便于用户区分「还能再观望」与「可清」
+  if (days <= SEG_DORMANT_MAX_DAYS) return { key: 'dormant', label: `沉寂临界（${days}天前）`, days };
+  return { key: 'stopped', label: `停更（${days}天前）`, days };
+}
+
+/** 在候选列表上批量写入 _segment（避免重复计算） */
+function attachSegments(list, opts) {
+  return (list || []).map((it) => {
+    const seg = classifySegment(it, opts);
+    return Object.assign({}, it, { _segment: seg, _activity: it._activity || classifyActivity(it.lastPubdate, it.archiveCount) });
+  });
+}
+
+/**
+ * 集合求差（借鉴 BilibiliFollowManage「从文件同步」语义）：
+ *   应收关注 = target（目标集），current = 当前已关注。
+ *   toUnfollow = 当前关注了、但目标集里没有的（多余 → 取关）
+ *   toFollow   = 目标集里有、但当前没关注的（缺失 → 补关注）
+ *   unchanged  = 两边都有
+ * 均按 mid 归一为字符串比对。
+ *
+ * @param {Array<{mid:string|number, uname?:string}>} current
+ * @param {Array<{mid:string|number, uname?:string}>} target
+ * @returns {{toFollow:Array, toUnfollow:Array, unchanged:Array}}
+ */
+function diffFollowLists(current, target) {
+  const cur = new Map((current || []).map((x) => [String(x.mid), x]));
+  const tgt = new Map((target || []).map((x) => [String(x.mid), x]));
+  const toFollow = [], toUnfollow = [], unchanged = [];
+  for (const [mid, it] of tgt) if (!cur.has(mid)) toFollow.push(it);
+  for (const [mid, it] of cur) {
+    if (tgt.has(mid)) unchanged.push(it);
+    else toUnfollow.push(it);
+  }
+  return { toFollow, toUnfollow, unchanged };
+}
+
+/**
  * 计算「单向关注 / 不互关」：在 followings 中、但不在 followers 集合里的人。
  * 仅用于「我的关注列表」模式下、且接口未直接给出 attribute 时做兜底；
  * 绝大多数情况 followings 接口本身就会返回 attribute，直接用 isOneWay 即可。
@@ -174,6 +251,8 @@ function canUnfollow(it, excl) {
 module.exports = {
   MUTUAL, FOLLOWED, BLOCKED,
   iFollow, followsMe, isMutual,
-  classifyActivity, ACTIVE_DAYS, OCCASIONAL_DAYS,
+  classifyActivity, ACTIVE_DAYS, OCCASIONAL_DAYS, DECAY_MIN_ARCHIVE, SEG_DORMANT_MAX_DAYS,
+  classifySegment, attachSegments,
+  diffFollowLists,
   computeOneWay, filterCandidates, canUnfollow
 };

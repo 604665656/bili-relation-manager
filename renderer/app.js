@@ -19,6 +19,9 @@ const BATCH = {
   reqId: 0            // 防止过期搜索/载入响应覆盖最新结果
 };
 
+/* 文件级同步（集合求差）的当前计划（doSyncPlan 计算、doSyncRun 执行） */
+let SYNC_PLAN = null;   // { toFollow:[{mid,uname}], toUnfollow:[{mid,uname}], unchangedCount }
+
 /* RB17：高频事件合并渲染——同一 key 在一帧内只重建一次 DOM，避免每条 record/stats 都全量重绘 */
 const _pendingRender = new Set();
 function scheduleRender(key, fn) {
@@ -264,6 +267,9 @@ function wireEvents() {
   $('#btn-batch-confirm-ok').onclick = doBatchUnfollow;
   $('#btn-batch-confirm-cancel').onclick = () => hideEl($('#modal-batch'));
   $('#modal-batch').onclick = (e) => { if (e.target === $('#modal-batch')) hideEl($('#modal-batch')); };
+  $('#btn-batch-backup').onclick = doBatchExportBackup;
+  $('#btn-sync-plan').onclick = doSyncPlan;
+  $('#btn-sync-run').onclick = doSyncRun;
   if (window.api.onUnfollowProgress) window.api.onUnfollowProgress(onUnfollowProgress);
   if (window.api.onUnfollowEnrich) window.api.onUnfollowEnrich(onUnfollowEnrich);
 }
@@ -909,6 +915,26 @@ function activityOf(it) {
   if (days <= 365) return { key: 'occasional', days, label: `偶尔（${days}天前）` };
   return { key: 'dormant', days, label: `沉寂（${days}天前）` };
 }
+
+/* 死粉三段细分（与 src/batch-unfollow.js 的 classifySegment 语义一致）。
+   渲染进程无 node，这里本地实现精简版；enrich 后优先用服务端算好的 _segment。 */
+const SEG_DORMANT_MAX_DAYS = 540;   // 与 batch-unfollow.js 保持一致
+function segmentOf(it) {
+  if (it && it._segment) return it._segment;
+  if (it && it.flagDeleted) return { key: 'deleted', label: '已注销/不可关注', days: null };
+  // 未分析（无最近投稿/投稿数数据）时返回 unknown，避免把「未分析」误标成「从未投稿」
+  const hasData = (it && (typeof it.lastPubdate === 'number' || (typeof it.archiveCount === 'number' && it.archiveCount > 0)));
+  if (!hasData) return { key: 'unknown', label: '待分析（先点「分析画像 / 活跃度」）', days: null };
+  const act = activityOf(it);
+  if (act.key === 'never') return { key: 'never', label: '从未投稿', days: null };
+  if (act.key === 'active') return { key: 'active', label: act.label, days: act.days };
+  if (act.key === 'occasional') return { key: 'occasional', label: act.label, days: act.days };
+  const days = act.days;
+  const archive = (it && typeof it.archiveCount === 'number') ? it.archiveCount : 0;
+  if (archive >= 20) return { key: 'decay', label: `内容变质（曾高产 ${archive} 投稿，停更 ${days}天）`, days };
+  if (days <= SEG_DORMANT_MAX_DAYS) return { key: 'dormant', label: `沉寂临界（${days}天前）`, days };
+  return { key: 'stopped', label: `停更（${days}天前）`, days };
+}
 function removeBatchBar() {
   hideEl($('#batch-prog'));   // 仅隐藏，保留静态元素（ui 单测要求 id 存在于 HTML）
 }
@@ -1061,10 +1087,15 @@ async function doBatchEnrich() {
     BATCH.profiles[mid] = {
       lastPubdate: p.lastPubdate, archiveCount: p.archiveCount,
       activity: p.activity, activityLabel: p.activityLabel, activityDays: p.activityDays,
-      _activity: { key: p.activity, days: p.activityDays, label: p.activityLabel }
+      segment: p.segment, segmentLabel: p.segmentLabel,
+      _activity: { key: p.activity, days: p.activityDays, label: p.activityLabel },
+      _segment: { key: p.segment, label: p.segmentLabel }
     };
     const it = BATCH.items.find((x) => String(x.mid) === String(mid));
-    if (it) it._activity = BATCH.profiles[mid]._activity;
+    if (it) {
+      it._activity = BATCH.profiles[mid]._activity;
+      it._segment = BATCH.profiles[mid]._segment;
+    }
   }
   applyBatchFilters();
   const n = Object.keys(profs).length;
@@ -1145,6 +1176,7 @@ function applyBatchFilters() {
   const lastPostWithin = $('#batch-lastpost') ? Number($('#batch-lastpost').value) : NaN;
   const minLevel = $('#batch-minlevel') ? Number($('#batch-minlevel').value) : 0;
   const needSign = $('#batch-hassign') ? $('#batch-hassign').checked : false;
+  const segment = $('#batch-segment') ? $('#batch-segment').value : '';
   // 与主进程 batch-unfollow.js 同一套语义（渲染进程无 node，这里本地实现精简版）
   BATCH.filtered = BATCH.items.filter((it) => {
     if (kw) {
@@ -1168,6 +1200,11 @@ function applyBatchFilters() {
     }
     if (!Number.isNaN(minLevel) && minLevel > 0 && Number(it.level || 0) < minLevel) return false;
     if (needSign && !(it.sign && String(it.sign).trim())) return false;
+    // 死粉分段（需先「分析画像 / 活跃度」得到最近投稿/投稿数；未分析时分段为 never/unknown 不会被误判）
+    if (segment) {
+      const seg = segmentOf(it);
+      if (seg.key !== segment) return false;
+    }
     return true;
   });
   renderBatch();
@@ -1206,6 +1243,7 @@ function renderBatch() {
   for (const it of rows) {
     const canPick = !BATCH.executing;
     const act = activityOf(it);
+    const seg = segmentOf(it);
     const faceUrl = it.face || '';
     const initial = escapeHtml((it.uname || '?').slice(0, 1));
     const avatar = faceUrl
@@ -1220,6 +1258,7 @@ function renderBatch() {
           `<span class="pill ${relClass(it.attribute)}">${relText(it.attribute)}</span>` +
           `<span class="pill fans">粉丝 ${it.fans == null ? '—' : fmtNum(it.fans)}</span>` +
           `<span class="pill act-${act.key}">${escapeHtml(act.label)}</span>` +
+          `<span class="pill seg-${seg.key}">${escapeHtml(seg.label)}</span>` +
         `</div>` +
         (it.sign ? `<div class="bsign">${escapeHtml(String(it.sign).slice(0, 60))}</div>` : '') +
         (it.result ? `<div class="bstatus ${/已取关/.test(it.result) ? 'res-ok' : /失败/.test(it.result) ? 'res-fail' : 'res-skip'}">${escapeHtml(it.result)}${it.detail ? ' · ' + escapeHtml(it.detail) : ''}</div>` : '') +
@@ -1245,6 +1284,8 @@ function updateBatchCounts() {
   const btn = $('#btn-batch-unfollow');
   btn.textContent = `一键取关（${sel}）`;
   btn.disabled = sel === 0 || BATCH.loading || BATCH.executing;
+  const bb = $('#btn-batch-backup');
+  if (bb) bb.disabled = sel === 0 || BATCH.loading || BATCH.executing;
   const eb = $('#btn-batch-enrich');
   if (eb) eb.disabled = total === 0 || BATCH.loading || BATCH.executing || BATCH.enriching;
   const crb = $('#btn-batch-checkrel');
@@ -1261,15 +1302,26 @@ function openBatchConfirm() {
   const sel = BATCH.filtered.filter((x) => x.selected);
   if (!sel.length) return;
   $('#batch-confirm-n').textContent = sel.length;
-  let h = '<table><tr><th>昵称</th><th>UID</th><th>关系</th><th>活跃度</th></tr>';
+  let h = '<table><tr><th>昵称</th><th>UID</th><th>关系</th><th>活跃度</th><th>死粉分段</th></tr>';
   for (const it of sel.slice(0, 30)) {
     const act = activityOf(it);
-    h += `<tr><td>${escapeHtml(it.uname || '')}</td><td>${escapeHtml(String(it.mid))}</td><td>${relText(it.attribute)}</td><td>${escapeHtml(act.label)}</td></tr>`;
+    const seg = segmentOf(it);
+    h += `<tr><td>${escapeHtml(it.uname || '')}</td><td>${escapeHtml(String(it.mid))}</td><td>${relText(it.attribute)}</td><td>${escapeHtml(act.label)}</td><td>${escapeHtml(seg.label)}</td></tr>`;
   }
-  if (sel.length > 30) h += `<tr><td colspan="4" class="muted">… 其余 ${sel.length - 30} 人略</td></tr>`;
+  if (sel.length > 30) h += `<tr><td colspan="5" class="muted">… 其余 ${sel.length - 30} 人略</td></tr>`;
   h += '</table>';
   $('#batch-confirm-list').innerHTML = h;
-  $('#batch-confirm-msg').textContent = '';
+
+  // 演示 / 备份闸门提示：让用户清楚「这一步到底会发生什么」
+  const a = ST.accounts.find((x) => x.id === ST.selected);
+  const demo = $('#batch-demo') && $('#batch-demo').checked;
+  const backupOn = !a || a.cfg.backupBeforeUnfollow !== false;
+  const notes = [];
+  if (demo) notes.push('① 演示模式：本次只预览「将取关名单」与跳过原因，不发送任何真实取关请求。');
+  else notes.push('① 真实执行：将向 B 站发送取关请求，不可撤销。');
+  if (!demo && backupOn) notes.push('② 执行前会自动导出待操作名单 CSV 备份（防误删，可回溯）。');
+  if (!demo && !backupOn) notes.push('② 已关闭「执行前备份」（不推荐）。');
+  $('#batch-confirm-msg').textContent = notes.join(' ');
   showEl($('#modal-batch'));
 }
 
@@ -1277,22 +1329,143 @@ async function doBatchUnfollow() {
   const sel = BATCH.filtered.filter((x) => x.selected);
   if (!sel.length) return;
   hideEl($('#modal-batch'));
+  const previewOnly = $('#batch-demo') && $('#batch-demo').checked;
+  const sessionCap = $('#batch-session-cap') ? clampInt($('#batch-session-cap').value, 0, 100000, 0) : 0;
+  const skipRecent = $('#batch-skip-days') ? clampInt($('#batch-skip-days').value, 0, 100000, 0) : 0;
   BATCH.executing = true;
   setBatchBusy(true);
   $('#batch-selall').disabled = true;
-  setStatus(`正在批量取关 ${sel.length} 人…（白名单/互关/不关注名单/已注销会被跳过）`);
+  setStatus(previewOnly
+    ? `正在预览取关名单（演示模式，不会真正取关）…`
+    : `正在批量取关 ${sel.length} 人…（白名单/互关/不关注名单/已注销会被跳过）`);
   sel.forEach((it) => { it.result = ''; it.detail = ''; });
   renderBatch();
   removeBatchBar();
   showEl($('#batch-prog'));
   const barEl = $('#batch-prog');
   if (barEl) { barEl.querySelector('i').style.width = '0%'; $('#batch-prog-txt').textContent = ''; }
-  const items = sel.map((it) => ({ mid: String(it.mid), uname: it.uname, attribute: it.attribute, fans: it.fans }));
+  const items = sel.map((it) => {
+    const seg = segmentOf(it);
+    return {
+      mid: String(it.mid), uname: it.uname, attribute: it.attribute, fans: it.fans,
+      segment: seg.key, segmentLabel: seg.label, followDays: it.followDays != null ? it.followDays : null
+    };
+  });
   try {
-    await window.api.unfollowBatch(ST.selected, items, { excludeMutual: true });
+    const r = await window.api.unfollowBatch(ST.selected, items, {
+      excludeMutual: true, excludeSpecial: true,
+      previewOnly, sessionCap, skipRecentFollowDays: skipRecent
+    });
+    if (previewOnly && r && r.ok) {
+      // 预览完成：展示将取关 / 跳过计划与备份路径，不刷新统计（没有真实变更）
+      const willUnfollow = r.willUnfollow || (r.plan ? r.plan.filter((x) => x.result === '将取关').length : 0);
+      setStatus(`演示模式完成：将取关约 ${willUnfollow} 人，跳过 ${sel.length - willUnfollow} 人（未发送任何请求）`);
+      showBatchMessage('info',
+        `演示模式预览完成：将取关 ${willUnfollow} 人、跳过 ${sel.length - willUnfollow} 人。`,
+        (r.backupPath ? '待操作名单已导出备份：' + r.backupPath : '未导出备份。') + ' 取消勾选「演示模式」并再次确认即可真正执行。');
+      toast(`演示模式：将取关约 ${willUnfollow} 人`);
+    }
   } catch (e) {
     toast('批量取关异常：' + ((e && e.message) || e));
     BATCH.executing = false; setBatchBusy(false); $('#batch-selall').disabled = false; updateBatchCounts();
+  }
+}
+
+/** 把当前已选名单导出为本地 CSV 备份（不发送任何请求，纯本地） */
+async function doBatchExportBackup() {
+  if (!ST.selected) return toast('请先选中一个账号');
+  const sel = BATCH.filtered.filter((x) => x.selected);
+  if (!sel.length) return toast('请先勾选要备份的账号');
+  const items = sel.map((it) => {
+    const seg = segmentOf(it);
+    return { mid: String(it.mid), uname: it.uname, segment: seg.key };
+  });
+  let r;
+  try { r = await window.api.unfollowExportBackup(ST.selected, items); }
+  catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+  if (!r || !r.ok) return toast('导出备份失败：' + ((r && r.error) || '未知'));
+  toast('已导出待操作备份：' + r.path);
+  setStatus('已导出待操作名单备份：' + r.path);
+}
+
+/** 解析「文件级同步」目标集文本：每行 `MID,昵称`（昵称可空），忽略空行与非法行 */
+function parseSyncTarget(text) {
+  const out = [];
+  const lines = String(text || '').split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const m = line.split(/[,，\t]/).map((s) => s.trim());
+    const mid = m[0];
+    if (!/^\d+$/.test(mid)) continue;   // 首字段必须是纯数字 UID，否则跳过该行
+    out.push({ mid, uname: m[1] || '' });
+  }
+  return out;
+}
+
+/** 计算同步计划：当前关注（来自「我的关注列表」载入）与目标集做集合求差 */
+async function doSyncPlan() {
+  if (!ST.selected) return toast('请先选中一个账号');
+  if (BATCH.mode !== 'follow' || !BATCH.items.length) {
+    return toast('请先用「我的关注列表 → 载入我的关注」载入当前关注，作为求差的基准');
+  }
+  const target = parseSyncTarget($('#sync-target').value);
+  if (!target.length) return toast('请先粘贴目标关注集（每行 MID,昵称）');
+  const current = BATCH.items.map((it) => ({ mid: String(it.mid), uname: it.uname || '' }));
+  let r;
+  try { r = await window.api.unfollowSyncPlan(ST.selected, current, target); }
+  catch (e) { r = { ok: false, error: (e && e.message) || String(e) }; }
+  if (!r || !r.ok) return toast('计算同步计划失败：' + ((r && r.error) || '未知'));
+  SYNC_PLAN = r;
+  const box = $('#sync-plan-box');
+  box.hidden = false;
+  const tf = (r.toFollow || []).slice(0, 60);
+  const tu = (r.toUnfollow || []).slice(0, 60);
+  let h = `<div class="sync-summary">目标 ${target.length} 人 · 当前关注 ${current.length} 人　→　` +
+    `<b class="tofollow">补关注 ${r.toFollow.length}</b> · <b class="tounfollow">取关多余 ${r.toUnfollow.length}</b> · 不变 ${r.unchangedCount}</div>`;
+  h += '<div class="sync-cols">';
+  h += '<div><div class="sync-col-h tofollow">补关注（目标有、当前没有）</div>' +
+    (tf.length ? '<table>' + tf.map((x) => `<tr><td>${escapeHtml(x.uname || '(无名)')}</td><td>${escapeHtml(x.mid)}</td></tr>`).join('') + '</table>' : '<p class="muted">无</p>') + '</div>';
+  h += '<div><div class="sync-col-h tounfollow">取关多余（当前有、目标没有）</div>' +
+    (tu.length ? '<table>' + tu.map((x) => `<tr><td>${escapeHtml(x.uname || '(无名)')}</td><td>${escapeHtml(x.mid)}</td></tr>`).join('') + '</table>' : '<p class="muted">无</p>') + '</div>';
+  h += '</div>';
+  if (r.toFollow.length > 60 || r.toUnfollow.length > 60) h += `<p class="muted">（仅预览前 60 条，执行时按完整名单处理）</p>`;
+  box.innerHTML = h;
+  $('#sync-exec-row').hidden = false;
+  setStatus(`同步计划：补关注 ${r.toFollow.length} 人 · 取关 ${r.toUnfollow.length} 人`);
+  toast(`同步计划已生成：补 ${r.toFollow.length} / 取关 ${r.toUnfollow.length}`);
+}
+
+/** 执行同步：先补关注（followBatch），再取关多余（batch）。演示模式只预览不执行。 */
+async function doSyncRun() {
+  if (!SYNC_PLAN) return toast('请先「计算同步计划」');
+  const demo = $('#sync-demo') && $('#sync-demo').checked;
+  if (demo) {
+    toast(`演示模式：将补关注 ${SYNC_PLAN.toFollow.length} 人、取关 ${SYNC_PLAN.toUnfollow.length} 人（未执行）`);
+    setStatus(`同步预览：补关注 ${SYNC_PLAN.toFollow.length} · 取关 ${SYNC_PLAN.toUnfollow.length}（未发送请求）`);
+    return;
+  }
+  if (!ST.selected) return toast('请先选中一个账号');
+  BATCH.executing = true; setBatchBusy(true);
+  setStatus('正在执行同步：先补关注，再取关多余…');
+  removeBatchBar(); showEl($('#batch-prog'));
+  const barEl = $('#batch-prog');
+  if (barEl) { barEl.querySelector('i').style.width = '0%'; $('#batch-prog-txt').textContent = ''; }
+  try {
+    if (SYNC_PLAN.toFollow.length) {
+      await window.api.unfollowFollowBatch(ST.selected, SYNC_PLAN.toFollow, { excludeMutual: true });
+    }
+    if (SYNC_PLAN.toUnfollow.length) {
+      const items = SYNC_PLAN.toUnfollow.map((it) => ({ mid: String(it.mid), uname: it.uname, attribute: 2 }));
+      await window.api.unfollowBatch(ST.selected, items, { excludeMutual: true, excludeSpecial: true, previewOnly: false });
+    }
+    toast('同步执行完成');
+    setStatus('同步执行完成');
+  } catch (e) {
+    toast('同步执行异常：' + ((e && e.message) || e));
+  } finally {
+    BATCH.executing = false; setBatchBusy(false); updateBatchCounts();
+    if (ST.selected) { try { await window.api.refreshStats(); } catch (e) { /* ignore */ } await reloadState(); }
   }
 }
 
@@ -1323,11 +1496,18 @@ async function onUnfollowProgress(ev) {
     updateBatchCounts();
     if (bar) {
       bar.querySelector('i').style.width = '100%';
-      $('#batch-prog-txt').textContent = `完成：成功 ${ev.ok} · 失败 ${ev.fail} · 跳过 ${ev.skip}`;
+      $('#batch-prog-txt').textContent = ev.preview
+        ? `预览完成：将取关 ${ev.ok} · 跳过 ${ev.skip}`
+        : `完成：成功 ${ev.ok} · 失败 ${ev.fail} · 跳过 ${ev.skip}`;
     }
-    setStatus(`批量取关完成：成功 ${ev.ok} · 失败 ${ev.fail} · 跳过 ${ev.skip}`);
-    toast(`批量取关完成：成功 ${ev.ok} 人`);
-    if (ST.selected) { try { await window.api.refreshStats(); } catch (e) { /* ignore */ } await reloadState(); }
+    if (ev.preview) {
+      setStatus(`演示模式完成：将取关 ${ev.ok} 人（未发送任何请求）`);
+      // 预览不刷新统计（没有真实变更），详细计划已由 doBatchUnfollow 的返回结果展示
+    } else {
+      setStatus(`批量取关完成：成功 ${ev.ok} · 失败 ${ev.fail} · 跳过 ${ev.skip}`);
+      toast(`批量取关完成：成功 ${ev.ok} 人`);
+      if (ST.selected) { try { await window.api.refreshStats(); } catch (e) { /* ignore */ } await reloadState(); }
+    }
   }
 }
 
