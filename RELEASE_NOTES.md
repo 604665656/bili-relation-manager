@@ -1,3 +1,19 @@
+## v2.4.1 修复二维码登录 405（紧急修复）
+
+用户实测反馈：应用内「二维码扫码登录」弹窗报「生成失败：生成二维码失败（HTTP 405）」，点刷新/扫码均无响应。
+
+### 根因
+B 站 `x/passport-login/web/qrcode/generate` 与 `x/passport-login/web/qrcode/poll` 两个接口**只接受 GET**（权威文档 bilibili-API-collect 明确标注「请求方式:GET」）。原实现误用 `POST`，服务端直接返回 `405 Method Not Allowed`，导致二维码根本生成不出来；poll 也同样是 POST，即便生成成功，扫码确认阶段也会 405 失败。
+
+### 修复
+- `src/auth.js`：`generateQr` 改为 `GET`；`pollQr` 改为 `GET` 并通过 `qrcode_key` 查询参数传递；`fetchRequest` 新增 `query` 参数支持（仅 GET 拼 URL）。
+- `renderer/app.js`：账号卡「续期」按钮点击不再误触发整卡重渲染（避免事件竞争），点击续期更稳。
+- `test/auth.js`：新增 2 条断言锁定「generateQr/pollQr 必须用 GET」，防止回归。
+
+### 验证
+- 实弹真实网络调用：`generateQr()` 返回 `ok:true` + 合法 PNG `dataUrl`；`pollQr()` 正确返回 `waiting`（未扫码）。
+- 单测 **175 项全绿**（原 173 + 2 条 GET 断言）。
+
 ## v2.4.0 竞品借鉴升级 · 死粉三段细分 · 文件级同步 · 风控面板化 · 四段式护栏
 
 承接你「同类/同风格竞品穷尽对比、借鉴升级」的诉求，对市面同类产品（BilibiliFollowManage、bilibili-following-manager、kkmx/bili-follow-manager、wuko233/bili-follow-cleaner、CKylinMC FoMan，及 X 生态 XUnfollow / Superpowers for X / FRAOTIAC 等）做了系统拆解，把最值得借鉴的能力落到 brm：

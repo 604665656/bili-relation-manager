@@ -35,13 +35,19 @@ nzPjfdTcqMz7djHum0qSZA0AyCBDABUqCrfNgCiJ00Ra7GmRj+YCK1NJEuewlb40
 JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----`;
 
-function fetchRequest(url, { method = 'GET', form = null, cookie = '', referer = null, timeoutMs = 30000 } = {}) {
+function fetchRequest(url, { method = 'GET', form = null, query = null, cookie = '', referer = null, timeoutMs = 30000 } = {}) {
   const headers = {
     'User-Agent': UA,
     Accept: 'application/json, text/plain, */*',
     Referer: referer || 'https://passport.bilibili.com/'
   };
   if (cookie) headers.Cookie = cookie;
+  // GET 接口（如 qrcode/generate、qrcode/poll）用 query 拼 URL；POST 接口用 form 当 body
+  if (query && method === 'GET') {
+    const u = new URL(url);
+    for (const [k, v] of Object.entries(query)) u.searchParams.set(k, String(v));
+    url = u.toString();
+  }
   const init = { method, headers };
   if (form) {
     const body = new URLSearchParams();
@@ -74,7 +80,7 @@ async function urlToQrDataUrl(url, opts = {}) {
  */
 async function generateQr() {
   const r = await fetchRequest('https://passport.bilibili.com/x/passport-login/web/qrcode/generate', {
-    method: 'POST', referer: 'https://passport.bilibili.com/'
+    method: 'GET', referer: 'https://passport.bilibili.com/'
   });
   const d = r.json && r.json.data;
   if (!r.json || r.json.code !== 0 || !d || !d.qrcode_key) {
@@ -92,7 +98,7 @@ async function generateQr() {
  */
 async function pollQr(key) {
   const r = await fetchRequest('https://passport.bilibili.com/x/passport-login/web/qrcode/poll', {
-    method: 'POST', form: { qrcode_key: key }, referer: 'https://passport.bilibili.com/'
+    method: 'GET', query: { qrcode_key: key }, referer: 'https://passport.bilibili.com/'
   });
   const data = r.json && r.json.data;
   const code = data && Number(data.code);

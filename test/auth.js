@@ -52,6 +52,15 @@ t('parseSetCookie 正确解析 Set-Cookie 数组', () => {
   assert.strictEqual(auth.buildCookieFromMap(m), 'SESSDATA=aaa; bili_jct=bbb; DedeUserID=1');
 });
 
+t('generateQr 必须用 GET（POST 会被 B 站返回 405）', async () => {
+  let seen = null;
+  const restore = mockFetch(async (url, init) => { seen = { url, init }; return { json: { code: 0, data: { qrcode_key: 'KEY123', url: 'https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=KEY123' } } }; });
+  try {
+    await auth.generateQr();
+    assert.strictEqual(seen.init.method, 'GET', 'generateQr 必须是 GET，否则返回 405');
+  } finally { restore(); }
+});
+
 t('generateQr 返回 qrcodeKey + dataURL（PNG base64）', async () => {
   const restore = mockFetch(async () => ({ json: { code: 0, data: { qrcode_key: 'KEY123', url: 'https://passport.bilibili.com/h5-app/passport/login/scan?qrcode_key=KEY123' } } }));
   try {
@@ -59,6 +68,16 @@ t('generateQr 返回 qrcodeKey + dataURL（PNG base64）', async () => {
     assert.ok(g.ok, 'generateQr 应成功');
     assert.strictEqual(g.qrcodeKey, 'KEY123');
     assert.ok(/^data:image\/png;base64,/.test(g.dataUrl), 'dataUrl 应为 PNG base64');
+  } finally { restore(); }
+});
+
+t('pollQr 必须用 GET + qrcode_key 查询参数（POST 会被 B 站返回 405）', async () => {
+  let seen = null;
+  const restore = mockFetch(async (url, init) => { seen = { url, init }; return { json: { code: 0, data: { code: 86101, message: 'x' } } }; });
+  try {
+    await auth.pollQr('K');
+    assert.strictEqual(seen.init.method, 'GET', 'pollQr 必须是 GET');
+    assert.ok(seen.url.includes('qrcode_key=K'), 'pollQr URL 应带 qrcode_key 查询参数，实际: ' + seen.url);
   } finally { restore(); }
 });
 

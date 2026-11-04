@@ -644,7 +644,7 @@ function renderAccounts() {
   for (const a of ST.accounts) {
     const el = document.createElement('div');
     el.className = 'acc-card' + (a.id === ST.selected ? ' sel' : '');
-    el.onclick = () => { ST.selected = a.id; renderAll(); };
+    el.onclick = (e) => { if (e.target.closest('button')) return; ST.selected = a.id; renderAll(); };
 
     const st = a.state || 'idle';
     const s = a.stats || {};
