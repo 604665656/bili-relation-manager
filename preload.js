@@ -13,6 +13,7 @@ const subscribe = (channel, cb) => {
 contextBridge.exposeInMainWorld('api', {
   getState: () => invoke('app:state'),
   openDataDir: () => invoke('app:openDataDir'),
+  openLogDir: () => invoke('app:openLogDir'),
 
   login: () => invoke('account:login'),
   loginRefresh: () => invoke('account:loginRefresh'),
@@ -38,6 +39,7 @@ contextBridge.exposeInMainWorld('api', {
 
   startTasks: (ids) => invoke('task:start', { ids: Array.isArray(ids) ? ids.map(String) : [] }),
   stopTasks: (ids) => invoke('task:stop', { ids: Array.isArray(ids) ? ids.map(String) : [] }),
+  duty: (on) => invoke('task:duty', { on: !!on }),
 
   exportCsv: () => invoke('app:exportCsv'),
 

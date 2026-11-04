@@ -24,7 +24,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-04 修复扫码确认后无凭据（poll 成功改从 Set-Cookie + SSO url 提取 cookie）v2.4.2';
+const BUILD_TAG = '2026-11-04 新增一键值守（实战+自动循环+异常自重启+开机自启）· 落盘日志 v2.4.3';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -172,7 +172,46 @@ function buildCookieHeader(map) {
   return parts.join('; ');
 }
 
+/* ════════ 磁盘日志（落盘，便于「检查日志」与太长值守排障）════════
+   渲染层 console 在打包后不可见；这里把每条日志同时追加到
+   userData/logs/engine-YYYY-MM-DD.log，按天滚动、单文件超过 5MB 自动轮转。 */
+let _logDir = null;
+let _logLines = 0;
+function ensureLogDir() {
+  if (_logDir) return true;
+  try {
+    _logDir = path.join(app.getPath('userData'), 'logs');
+    if (!fs.existsSync(_logDir)) fs.mkdirSync(_logDir, { recursive: true });
+    return true;
+  } catch (e) { _logDir = null; return false; }
+}
+function logFilePath() {
+  const d = new Date();
+  const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return path.join(_logDir, `engine-${ymd}.log`);
+}
+function appendLogToFile(level, msg) {
+  if (!ensureLogDir() || !_logDir) return;
+  _logLines++;
+  const ts = new Date().toISOString();
+  const line = `${ts} [${level}] ${msg}\n`;
+  const f = logFilePath();
+  // 每 ~200 行检查一次体积，超过 5MB 则轮转为 .old（保留最近一份）
+  if (_logLines % 200 === 0) {
+    try {
+      const st = fs.statSync(f);
+      if (st.size > 5 * 1024 * 1024) {
+        const old = f + '.old';
+        if (fs.existsSync(old)) fs.unlinkSync(old);
+        fs.renameSync(f, old);
+      }
+    } catch (e) { /* 轮转失败不影响主流程 */ }
+  }
+  fs.promises.appendFile(f, line).catch(() => { /* 落盘失败忽略 */ });
+}
+
 function sendLog(level, msg) {
+  appendLogToFile(level, msg);
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       mainWindow.webContents.send('bus:log', { accountId: '', level, msg, ts: Date.now() });
@@ -357,6 +396,12 @@ function registerIPC() {
   ipcMain.handle('app:openDataDir', safe('app:openDataDir', () => {
     shell.openPath(store.dir);
     return true;
+  }));
+
+  ipcMain.handle('app:openLogDir', safe('app:openLogDir', () => {
+    ensureLogDir();
+    if (_logDir) shell.openPath(_logDir);
+    return !!_logDir;
   }));
 
   ipcMain.handle('account:login', safe('account:login', async () => await openLoginWindow()));
@@ -562,6 +607,44 @@ function registerIPC() {
     const ids = p && Array.isArray(p.ids) ? p.ids.map(String) : null;
     if (ids === null) engine.stopAll(); else engine.stop(ids);
     return { busy: engine.isBusy() };
+  }));
+
+  /* ════════ 一键值守：无人值守跑量总开关 ════════
+     开启：把「已启用 + 勾选了任务」的账号一次性设为
+       ① 实战（dryRun=false，真正执行关注/取关）
+       ② 自动循环（autoLoop=true，跑完一轮自动接下一轮）
+       ③ 异常自重启（errRetryMin>0，撞错后等待 N 分钟自动恢复，最多 MAX_ERR_RESTART 次）
+       ④ 合理每日上限（dailyCap=0 时给一个保守安全值，避免触发 -352/-509 全局熔断）
+     并打开全局「启动时自动恢复任务」，使软件第二天 / 崩溃重启后自动接回。
+     这样用户点一次即可长期无人值守，无需反复手动「开始」。 */
+  ipcMain.handle('task:duty', safe('task:duty', (p) => {
+    const on = !!(p && p.on);
+    if (!on) {
+      engine.stopAll();
+      sendLog('info', '一键值守已关闭：已停止全部账号任务');
+      return { ok: true, on: false };
+    }
+    const accounts = store.listAccounts().filter((a) => a.cfg && a.cfg.enabled !== false &&
+      (a.cfg.tasks && (a.cfg.tasks.unfollow || a.cfg.tasks.follow)));
+    if (!accounts.length) {
+      return { ok: false, on: false, error: '没有「已启用且勾选了任务」的账号；请先登录账号并在配置里勾选任务类型' };
+    }
+    const DUTY_RETRY = 10;    // 异常后 10 分钟自动重启（受 MAX_ERR_RESTART 上限保护）
+    const DUTY_DAILY = 150;   // 每账号每日操作上限（关注+取关合计），保守避免触发风控全局冷却
+    let patched = 0;
+    for (const a of accounts) {
+      const cfg = a.cfg;
+      const patch = { dryRun: false, autoLoop: true };
+      if (!(Number(cfg.errRetryMin) > 0)) patch.errRetryMin = DUTY_RETRY;
+      if (!(Number(cfg.dailyCap) > 0)) patch.dailyCap = DUTY_DAILY;
+      store.patchAccount(a.id, { cfg: Object.assign({}, cfg, patch) });
+      patched++;
+    }
+    store.updateGlobal({ autoStartOnLaunch: true });
+    const ids = accounts.map((a) => a.id);
+    engine.startAll(ids);
+    sendLog('ok', `一键值守已开启：${patched} 个账号进入【实战+自动循环+异常自重启】；全局「启动时自动恢复」已打开；每日上限 ${DUTY_DAILY}/账号`);
+    return { ok: true, on: true, ids, patched, dailyCap: DUTY_DAILY };
   }));
 
   ipcMain.handle('app:exportCsv', safe('app:exportCsv', async () => exportCsvNow()));

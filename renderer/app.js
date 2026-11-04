@@ -84,6 +84,28 @@ function renderAll() {
   renderLogs();
   renderRecords();
   renderStats();
+  refreshDutyBtn();
+}
+
+/** 根据账号实时状态反映「一键值守」按钮（实战 + 自动循环 + 正在运行 = 值守中） */
+function refreshDutyBtn() {
+  const el = $('#btn-duty');
+  if (!el) return;
+  const dutyActive = ST.accounts.some((a) => a.cfg && a.cfg.enabled !== false &&
+    (a.cfg.tasks && (a.cfg.tasks.unfollow || a.cfg.tasks.follow)) &&
+    a.cfg.dryRun === false && a.cfg.autoLoop === true &&
+    (a.state === 'running' || a.state === 'waiting' || a.state === 'restart'));
+  if (dutyActive) {
+    if (!el.classList.contains('on')) {
+      el.classList.add('on');
+      el.textContent = '🛡 值守中（点击退出）';
+    }
+  } else {
+    if (el.classList.contains('on')) {
+      el.classList.remove('on');
+      el.textContent = '🛡 一键值守';
+    }
+  }
 }
 
 /* ─────────── 交互绑定 ─────────── */
@@ -205,7 +227,31 @@ function wireEvents() {
   $('#btn-stop-all').onclick = async () => { await window.api.stopTasks(null); toast('已请求停止全部账号'); };
   $('#btn-export').onclick = doExport;
   $('#btn-datadir').onclick = () => window.api.openDataDir();
+  $('#btn-logdir').onclick = () => window.api.openLogDir ? window.api.openLogDir() : window.api.openDataDir();
   $('#btn-refresh-stats').onclick = async () => { setStatus('正在刷新统计…'); await window.api.refreshStats(); await reloadState(); toast('统计已刷新'); setStatus('就绪'); };
+
+  // 一键值守：开启 = 实战 + 自动循环 + 异常自重启 + 开机自启；关闭 = 停止全部
+  $('#btn-duty').onclick = async () => {
+    const el = $('#btn-duty');
+    if (!el.classList.contains('on')) {
+      const hasTask = ST.accounts.some((a) => a.cfg && a.cfg.enabled !== false &&
+        (a.cfg.tasks && (a.cfg.tasks.unfollow || a.cfg.tasks.follow)));
+      if (!hasTask) { toast('请先登录账号并在配置里勾选任务类型（清理/关注）'); return; }
+      if (!confirm('一键值守将把全部已启用账号设为：\n  • 实战操作（真正关注/取关，非演练）\n  • 自动循环（跑完一轮自动接下一轮）\n  • 异常自重启（撞错后自动恢复）\n  • 开机自动接回任务\n\n这将真正对 B 站执行操作，每日每账号上限约 150 次。\n确定开启无人值守跑量？')) return;
+      const r = await window.api.duty(true);
+      if (!r || !r.ok) { toast('开启失败：' + (r && (r.error || r.message) || '未知错误')); return; }
+      el.classList.add('on');
+      el.textContent = '🛡 值守中（点击退出）';
+      toast(`一键值守已开启：${r.ids ? r.ids.length : 0} 个账号进入实战循环`);
+    } else {
+      if (!confirm('确定退出一键值守并停止全部账号任务？')) return;
+      await window.api.duty(false);
+      el.classList.remove('on');
+      el.textContent = '🛡 一键值守';
+      toast('已退出值守，全部任务停止');
+    }
+    await reloadState();
+  };
 
   $('#btn-start-one').onclick = () => ST.selected && doStart([ST.selected]);
   $('#btn-stop-one').onclick = async () => { if (ST.selected) await window.api.stopTasks([ST.selected]); };
@@ -1525,6 +1571,7 @@ function onAccountState(d) {
   if (d.stats) a.stats = Object.assign({}, a.stats, d.stats);
   if (d.live) a.live = d.live;
   renderAccounts();
+  refreshDutyBtn();
   if (d.id === ST.selected) renderSelected();
 }
 function onStats(d) {
