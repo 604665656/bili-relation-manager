@@ -24,7 +24,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-04 新增一键值守（实战+自动循环+异常自重启+开机自启）· 落盘日志 v2.4.3';
+const BUILD_TAG = '2026-11-04 修复引擎每轮日志未落盘（capGuard/风控警告现可查）v2.4.4';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */
@@ -95,7 +95,12 @@ function init() {
   store.load();
   engine = new Engine(store);
 
-  engine.on('log', (row) => { if (mainWindow) mainWindow.webContents.send('bus:log', row); });
+  engine.on('log', (row) => {
+    // 引擎每轮活动也落盘，使「检查日志」能看到 capGuard / 风控 / 关注封锁等关键警告
+    const who = (row && row.accountId) ? `[${(row.accountId || '').slice(0, 8)}] ` : '';
+    appendLogToFile(row && row.level || 'info', who + (row && row.msg || ''));
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('bus:log', row);
+  });
   engine.on('record', (row) => { if (mainWindow) mainWindow.webContents.send('bus:record', row); });
   engine.on('account', (row) => { if (mainWindow) mainWindow.webContents.send('bus:account', row); });
   engine.on('stats', (row) => { if (mainWindow) mainWindow.webContents.send('bus:stats', row); });
