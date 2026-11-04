@@ -24,7 +24,7 @@ function clampNum(v, lo, hi, dft) {
 
 const IS_DEV = !app.isPackaged;
 /** 构建标记：界面上会显示，便于确认运行的是哪一版 */
-const BUILD_TAG = '2026-11-04 修复二维码登录 405（generate/poll 改 GET）· 账号卡「续期」点击不再误触重渲染 v2.4.1';
+const BUILD_TAG = '2026-11-04 修复扫码确认后无凭据（poll 成功改从 Set-Cookie + SSO url 提取 cookie）v2.4.2';
 let store, engine, mainWindow = null, loginWindow = null, updater = null;
 
 /** 热更新节奏：启动后首查、之后定时复查、回到前台补查（都只为「别错过新版」） */

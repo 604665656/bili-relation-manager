@@ -1,3 +1,23 @@
+## v2.4.2 修复扫码确认后「无凭据 / 登录不成功」
+
+v2.4.1 修复了 405 让二维码能生成，但用户实测「扫码又不行」——二维码出来、手机也扫了，却始终登录不上。
+
+### 根因
+`pollQr` 成功分支只读取 `data.cookie_info.cookies`。但 B 站当前接口（bilibili-API-collect 官方文档 + 多个 2024-2025 实战实现一致确认）的成功响应**不再以 `cookie_info` 下发凭据**，而是：
+- ① 通过 poll 响应本身的 **`Set-Cookie`** 下发 `SESSDATA / bili_jct / DedeUserID` 等；
+- ② 通过 `data.url`（跨域 SSO 地址）在访问时再下发跨域 cookie。
+
+旧代码读不到 `cookie_info` → 返回「扫码成功但未返回任何 cookie」→ 扫描确认后毫无反应。
+
+### 修复
+- `src/auth.js` `pollQr` 重写凭据收集，三路并集兜底：① `Set-Cookie` 解析（主）② `data.cookie_info.cookies`（旧接口兼容）③ `data.url` 跨域 SSO，沿 **302 重定向链逐跳收集 Set-Cookie**（最多 6 跳，最佳努力）。
+- `fetchRequest` 新增 `redirect` 参数与 `location` 返回，支撑 SSO 手动重定向跟随。
+- `test/auth.js` 新增 3 条断言：Set-Cookie 提取、cookie_info 与 Set-Cookie 合并去重、SSO 重定向链逐跳收集。
+
+### 验证
+- 单测 **178 项全绿**（原 175 + 3 条 pollQr 凭据断言）。
+- 实弹网络已验证 generate/poll 走通（v2.4.1 阶段）；本版为成功分支凭据提取修复，逻辑由单测全覆盖。
+
 ## v2.4.1 修复二维码登录 405（紧急修复）
 
 用户实测反馈：应用内「二维码扫码登录」弹窗报「生成失败：生成二维码失败（HTTP 405）」，点刷新/扫码均无响应。

@@ -35,7 +35,7 @@ nzPjfdTcqMz7djHum0qSZA0AyCBDABUqCrfNgCiJ00Ra7GmRj+YCK1NJEuewlb40
 JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----`;
 
-function fetchRequest(url, { method = 'GET', form = null, query = null, cookie = '', referer = null, timeoutMs = 30000 } = {}) {
+function fetchRequest(url, { method = 'GET', form = null, query = null, cookie = '', referer = null, redirect = 'follow', timeoutMs = 30000 } = {}) {
   const headers = {
     'User-Agent': UA,
     Accept: 'application/json, text/plain, */*',
@@ -48,7 +48,7 @@ function fetchRequest(url, { method = 'GET', form = null, query = null, cookie =
     for (const [k, v] of Object.entries(query)) u.searchParams.set(k, String(v));
     url = u.toString();
   }
-  const init = { method, headers };
+  const init = { method, headers, redirect };
   if (form) {
     const body = new URLSearchParams();
     for (const [k, v] of Object.entries(form)) body.append(k, String(v));
@@ -60,9 +60,10 @@ function fetchRequest(url, { method = 'GET', form = null, query = null, cookie =
     const text = await res.text();
     let json;
     try { json = JSON.parse(text); } catch (e) { json = null; }
-    // 把响应头一并带回，便于 refresh 流程解析 Set-Cookie
+    // 把响应头一并带回，便于 refresh / 扫码流程解析 Set-Cookie 与重定向 Location
     const setCookie = (res.headers && res.headers.getSetCookie) ? res.headers.getSetCookie() : [];
-    return { status: res.status, json, text, setCookie };
+    const location = (res.headers && res.headers.get) ? (res.headers.get('location') || '') : '';
+    return { status: res.status, json, text, setCookie, location };
   });
 }
 
@@ -108,13 +109,39 @@ async function pollQr(key) {
     return { status: mapped, message: (data && data.message) || (r.json && r.json.message) || '' };
   }
 
-  // 成功：cookie_info.cookies 是 B 站下发的完整 cookie 列表
+  // 成功：凭据下发方式随 B 站接口演进有几套并存，必须全部兜底：
+  //   ① 新版：poll 响应本身通过 Set-Cookie 下发 SESSDATA/bili_jct 等（权威文档 & 多实现确认）
+  //   ② 旧版：data.cookie_info.cookies 数组
+  //   ③ 新版：data.url 是跨域 SSO 地址，需再 GET 一次以补全跨域 cookie
+  let cookieMap = parseSetCookie(r.setCookie);
   const info = data.cookie_info || {};
   const cookies = Array.isArray(info.cookies) ? info.cookies : [];
-  if (!cookies.length) {
-    return { status: 'error', message: '扫码成功但未返回任何 cookie' };
+  for (const c of cookies) { if (c && c.name) cookieMap[c.name] = String(c.value); }
+  let cookie = Object.keys(cookieMap).map((k) => `${k}=${cookieMap[k]}`).join('; ');
+
+  // ③ 跨域 SSO 补全（最佳努力，失败不影响主凭据）：访问 data.url，沿重定向链逐跳收集 Set-Cookie
+  if (data.url) {
+    try {
+      let cur = await fetchRequest(data.url, {
+        method: 'GET', cookie, referer: 'https://passport.bilibili.com/',
+        redirect: 'manual', timeoutMs: 15000
+      });
+      for (let hop = 0; hop < 6; hop++) {
+        const m = parseSetCookie(cur.setCookie);
+        for (const k of Object.keys(m)) if (!(k in cookieMap)) cookieMap[k] = m[k];
+        if (cur.status < 300 || cur.status >= 400 || !cur.location) break;
+        cur = await fetchRequest(cur.location, {
+          method: 'GET', cookie, referer: 'https://passport.bilibili.com/',
+          redirect: 'manual', timeoutMs: 15000
+        });
+      }
+      cookie = Object.keys(cookieMap).map((k) => `${k}=${cookieMap[k]}`).join('; ');
+    } catch (e) { /* SSO 补全失败：已有主凭据仍可尝试登录 */ }
   }
-  const cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+
+  if (!cookie) {
+    return { status: 'error', message: '扫码成功但未返回任何 cookie（接口未下发凭据）' };
+  }
   return {
     status: 'success',
     cookie,

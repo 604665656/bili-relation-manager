@@ -21,7 +21,10 @@ function mockFetch(handler) {
     const r = await handler(url, init);
     return {
       status: r.status || 200,
-      headers: { getSetCookie: () => (r.setCookie || []) },
+      headers: {
+        getSetCookie: () => (r.setCookie || []),
+        get: (name) => (name && String(name).toLowerCase() === 'location' ? (r.location || '') : '')
+      },
       text: async () => (r.text != null ? r.text : JSON.stringify(r.json))
     };
   };
@@ -111,6 +114,75 @@ t('pollQr：成功返回完整 cookie + refreshToken', async () => {
     assert.strictEqual(r.status, 'success', '应 success');
     assert.strictEqual(r.cookie, 'SESSDATA=sess-val; bili_jct=jct-val; DedeUserID=123', 'cookie 拼接错误');
     assert.strictEqual(r.refreshToken, 'RT999');
+  } finally { restore(); }
+});
+
+t('pollQr：成功时从 Set-Cookie 提取凭据（新接口不下发 cookie_info）', async () => {
+  const restore = mockFetch(async () => ({
+    status: 200,
+    setCookie: [
+      'SESSDATA=ss-val; Path=/; Domain=.bilibili.com; HttpOnly',
+      'bili_jct=jc-val; Path=/; Domain=.bilibili.com',
+      'DedeUserID=123; Path=/; Domain=.bilibili.com'
+    ],
+    json: { code: 0, data: { code: 0, message: '0', refresh_token: 'RT777', url: '' } }
+  }));
+  try {
+    const r = await auth.pollQr('K');
+    assert.strictEqual(r.status, 'success', '应 success');
+    assert.ok(r.cookie.includes('SESSDATA=ss-val'), '应从 Set-Cookie 提取 SESSDATA: ' + r.cookie);
+    assert.ok(r.cookie.includes('bili_jct=jc-val'), '应提取 bili_jct');
+    assert.ok(r.cookie.includes('DedeUserID=123'), '应提取 DedeUserID');
+    assert.strictEqual(r.refreshToken, 'RT777');
+  } finally { restore(); }
+});
+
+t('pollQr：Set-Cookie 与 cookie_info 并存时合并去重', async () => {
+  const restore = mockFetch(async () => ({
+    status: 200,
+    setCookie: ['SESSDATA=from-set; Path=/; Domain=.bilibili.com'],
+    json: {
+      code: 0,
+      data: {
+        code: 0, message: '0', refresh_token: 'RT0', url: '',
+        cookie_info: { cookies: [
+          { name: 'SESSDATA', value: 'from-info' },
+          { name: 'bili_jct', value: 'jc' }
+        ] }
+      }
+    }
+  }));
+  try {
+    const r = await auth.pollQr('K');
+    assert.strictEqual(r.status, 'success');
+    // cookie_info 在 Set-Cookie 之后合并，同名以 cookie_info 为准（后者覆盖）
+    assert.ok(r.cookie.includes('SESSDATA=from-info'), 'cookie_info 应覆盖同名: ' + r.cookie);
+    assert.ok(r.cookie.includes('bili_jct=jc'), '应含 bili_jct');
+  } finally { restore(); }
+});
+
+t('pollQr：data.url 跨域 SSO 重定向链逐跳收集 Set-Cookie', async () => {
+  const SSO = 'https://passport.biligame.com/x/passport-login/web/crossDomain?key=abc';
+  const NEXT = 'https://api.bilibili.com/x/passport-login/web/crossDomain?ticket=xyz';
+  const restore = mockFetch(async (url) => {
+    if (url === SSO) {
+      return { status: 302, location: NEXT, setCookie: ['SESSDATA=via-sso; Path=/; Domain=.bilibili.com'] };
+    }
+    if (url === NEXT) {
+      return { status: 200, setCookie: ['bili_jct=via-next; Path=/; Domain=.bilibili.com'] };
+    }
+    // 首次 poll 成功
+    return {
+      status: 200, setCookie: ['DedeUserID=777; Path=/; Domain=.bilibili.com'],
+      json: { code: 0, data: { code: 0, message: '0', refresh_token: 'RTss', url: SSO } }
+    };
+  });
+  try {
+    const r = await auth.pollQr('K');
+    assert.strictEqual(r.status, 'success', '应 success');
+    assert.ok(r.cookie.includes('DedeUserID=777'), 'poll 主凭据应保留');
+    assert.ok(r.cookie.includes('SESSDATA=via-sso'), '应收集 SSO 第一跳 cookie');
+    assert.ok(r.cookie.includes('bili_jct=via-next'), '应收集 SSO 重定向下一跳 cookie');
   } finally { restore(); }
 });
 
